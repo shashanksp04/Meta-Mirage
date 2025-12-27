@@ -17,13 +17,17 @@ INPUT_FILE="../Datasets/sample_bench/sample_${BENCH_TYPE}_benchmark.json"
 ################### Open Source Models ###################
 # Qwen/Qwen2.5-VL-3B-Instruct
 
-MODEL_NAME='gpt-4o-mini'
+MODEL_NAME='Qwen/Qwen2.5-VL-3B-Instruct'
 MODEL_NAME_CLEANED=$(echo "$MODEL_NAME" | sed 's|.*/||')
 
 # You can use VLLM to launch the Open Source Models, remember to change the OPENAI_API_BASE
-OPENAI_API_BASE="None"
+OPENAI_API_BASE="http://localhost:8000/v1"
 
 NUM_PROCESSES=10
+
+EMBED_MODEL_NAME="BAAI/bge-base-en-v1.5"
+TEST_MODEL="Qwen/Qwen2.5-VL-3B-Instruct"
+DEVICE="None"
 
 echo "Inference $MODEL_NAME on $BENCH_TYPE Benchmark"
 
@@ -39,7 +43,10 @@ python generate.py \
     --output_file $OUTPUT_FILE \
     --model_name $MODEL_NAME \
     --openai_api_base $OPENAI_API_BASE \
-    --num_processes $NUM_PROCESSES
+    --num_processes $NUM_PROCESSES \
+    --embed_model_name $EMBED_MODEL_NAME \
+    --test_model $TEST_MODEL \
+    --device $DEVICE
 
 ################# Split Inference Results #################
 

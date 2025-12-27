@@ -9,9 +9,13 @@ import os
 from tqdm import tqdm
 import argparse
 import time
+from rag_agent.main import MainAgent
 
 class Generate:
-    def __init__(self, raw_data_file, output_file, model_name="gpt-4o", openai_api_base="", num_processes=None):
+    def __init__(self, raw_data_file, output_file, model_name="gpt-4o", openai_api_base="", num_processes=None, 
+    embed_model_name="BAAI/bge-base-en-v1.5", 
+    test_model="Qwen2.5-VL-3B-Instruct",
+    device="None"):
         self.raw_data_file = raw_data_file
         self.output_file = output_file
         self.offline_model = model_name
@@ -19,6 +23,8 @@ class Generate:
         self.openai_api_base = openai_api_base
         # If the number of processes is not specified, use the number of CPU cores
         self.num_processes = num_processes if num_processes is not None else os.cpu_count()
+        self.rag_agent = MainAgent(test_model=test_model, embed_model_name=embed_model_name, device=device)
+        self.rag_runner = self.rag_agent.main()
 
     def get_prompt(self, item):
         question = item["question"]
@@ -51,7 +57,19 @@ class Generate:
                 else:
                     client = Client(model_name=self.offline_model, openai_api_base=self.openai_api_base, messages=[])
                 
-                response = client.chat(prompt=prompt["user"], images=prompt["images"])
+                # Get RAG agent response and enhance query
+                enhanced_query = prompt["user"]  # Default to original query
+                try:
+                    rag_response = self.rag_runner.run_debug(prompt["user"])
+                    # Extract agent's answer (everything after "Rag_Agent > ")
+                    if "Rag_Agent > " in rag_response:
+                        rag_answer = rag_response.split("Rag_Agent > ", 1)[1].strip()
+                        enhanced_query = f"{prompt['user']}\n\nadditional context: {rag_answer}"
+                except Exception as rag_error:
+                    # If RAG fails, use original query
+                    print(f"RAG agent failed for item {item_id}: {rag_error}. Using original query.")
+                
+                response = client.chat(prompt=enhanced_query, images=prompt["images"])
                 item[model_name] = response
                 # item["info"] = client.info() # Uncomment if needed
                 item["history"] = client.get_history()
@@ -136,7 +154,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="gpt-4o", help="Model name to use.")
     parser.add_argument("--openai_api_base", type=str, default="", help="Base URL for OpenAI API.")
     parser.add_argument("--num_processes", type=int, default=os.cpu_count(), help="Number of processes to use.")
+    parser.add_argument("--embed_model_name", type=str, default="BAAI/bge-base-en-v1.5", help="Embedding model name to use.")
+    parser.add_argument("--test_model", type=str, default="Qwen2.5-VL-3B-Instruct", help="Test model name to use.")
+    parser.add_argument("--device", type=str, default="None", help="Device to use.")
     args = parser.parse_args()
 
-    reformatter = Generate(raw_data_file=args.input_file, output_file=args.output_file, model_name=args.model_name, num_processes=args.num_processes, openai_api_base=args.openai_api_base)
+    reformatter = Generate(raw_data_file=args.input_file, output_file=args.output_file, model_name=args.model_name, num_processes=args.num_processes, openai_api_base=args.openai_api_base, embed_model_name=args.embed_model_name, test_model=args.test_model, device=args.device)
     reformatter.generate()
