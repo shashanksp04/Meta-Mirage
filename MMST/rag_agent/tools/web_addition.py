@@ -58,7 +58,7 @@ class WebAddition:
             return soup.title.string.strip()
 
         h1 = soup.find("h1")
-        if h1:
+        if h1 and h1.string:
             return h1.string.strip()
 
         return None

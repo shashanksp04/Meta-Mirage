@@ -1,6 +1,7 @@
 from typing import List, Dict
 import os
 import requests
+import json
 import trafilatura
 from bs4 import BeautifulSoup
 import re
@@ -105,11 +106,23 @@ class WebSearch:
                 "error_message": response.text
             }
 
-        data = response.json()
-        results = []
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            return {
+                "status": "error",
+                "error_message": "Failed to parse JSON response",
+            }
 
-        for item in data.get("results", {}).get("web", []):
-            extracted_text = self.extract_data(item["url"])
+        results = []
+        results_data = data.get("results", {})
+
+        for item in results_data.get("web", []):
+            url = item.get("url")
+            if not url:
+                continue
+
+            extracted_text = self.extract_data(url)
 
             if not extracted_text:
                 results.append({
