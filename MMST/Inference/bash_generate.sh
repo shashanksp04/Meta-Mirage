@@ -21,7 +21,8 @@ MODEL_NAME='Qwen/Qwen2.5-VL-3B-Instruct'
 MODEL_NAME_CLEANED=$(echo "$MODEL_NAME" | sed 's|.*/||')
 
 # You can use VLLM to launch the Open Source Models, remember to change the OPENAI_API_BASE
-OPENAI_API_BASE="http://localhost:8000/v1"
+# Update this to match your vLLM server port (default: 8000, current: 11434)
+OPENAI_API_BASE="http://127.0.0.1:11434/v1"
 
 NUM_PROCESSES=10
 

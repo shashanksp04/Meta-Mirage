@@ -9,7 +9,7 @@ class KeywordExtractor:
     Agent tool for extracting search-optimized keywords from a user query.
     """
 
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-14B-Instruct", openai_api_base: str = "http://127.0.0.1:8000/v1"):
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-3B-Instruct", openai_api_base: str = "http://127.0.0.1:11434/v1"):
         """
         Args:
             model_name: LLM used for keyword extraction

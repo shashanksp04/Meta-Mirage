@@ -1,19 +1,20 @@
 import chromadb
-from tools.pdf_addition import PDFAddition
-from tools.web_search import WebSearch
-from tools.web_addition import WebAddition
-from tools.confidence_evaluator import ConfidenceEvaluator
-from tools.keyword_extractor import KeywordExtractor
-from utils.ContentUtils import ContentUtils
-from utils.Embedding import SentenceTransformerEmbeddingFunction
-from google.adk.llms import OpenAICompatibleLLM
+from .tools.pdf_addition import PDFAddition
+from .tools.web_search import WebSearch
+from .tools.web_addition import WebAddition
+from .tools.confidence_evaluator import ConfidenceEvaluator
+from .tools.keyword_extractor import KeywordExtractor
+from .utils.ContentUtils import ContentUtils
+from .utils.Embedding import SentenceTransformerEmbeddingFunction
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
 from typing import Optional, Dict, List, Any
 
 
 class MainAgent:
-    def __init__(self, test_model: str = "Qwen2.5-VL-3B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None"):
+    def __init__(self, test_model: str = "Qwen2.5-VL-3B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None", api_base: str = "http://127.0.0.1:11434/v1"):
+        self.test_model = test_model
+        self.api_base = api_base
         self.embedding_function = SentenceTransformerEmbeddingFunction(embed_model_name, device)
         self.client = chromadb.PersistentClient(path="./chroma_database/chroma_db") # path has to be a valid path to a directory
         self.collection = self.client.get_or_create_collection(name="meta-mirage_collection", embedding_function=self.embedding_function)
@@ -24,7 +25,7 @@ class MainAgent:
         self.web_search = WebSearch()
         self.web_addition = WebAddition(self.collection, self.content_utils, self.null_str, self.null_int)
         self.confidence_evaluator = ConfidenceEvaluator(self.collection, self.content_utils)
-        self.keyword_extractor = KeywordExtractor(model_name=test_model)
+        self.keyword_extractor = KeywordExtractor(model_name=test_model, openai_api_base=api_base)
 
     def retrieve_content(self,
             *,
@@ -65,18 +66,18 @@ class MainAgent:
         }
 
     def main(self):
-
-        qwen_llm = OpenAICompatibleLLM(
-            model=self.test_model,
-            api_base="http://localhost:8000/v1",
-            api_key="EMPTY",  # vLLM ignores this
-            temperature=0.2,
-            max_tokens=1024,
-        )
-
+        import os
+        # Set API base URL for OpenAI-compatible endpoints (vLLM)
+        # google-adk uses OPENAI_API_BASE environment variable
+        os.environ["OPENAI_API_BASE"] = self.api_base
+        os.environ["OPENAI_API_KEY"] = "EMPTY"  # vLLM ignores this
+        
+        # Format model name for google-adk: "openai/model_name" for OpenAI-compatible APIs
+        model_name = f"openai/{self.test_model}"
+        
         rag_agent = LlmAgent(
             name="Rag_Agent",
-            llm=qwen_llm,
+            model=model_name,
             description="An agent that retrieves, evaluates, and ingests knowledge.",
             instruction="""
             You are a retrieval-augmented assistant that must answer questions using verified evidence.
