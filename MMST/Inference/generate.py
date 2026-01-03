@@ -33,14 +33,98 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
             
             item_id, query = request
             try:
+                # Clear previous web search calls for this item
+                rag_agent.web_search_calls = []
                 # run_debug is async, so we need to await it
                 rag_response = loop.run_until_complete(rag_runner.run_debug(query))
                 # Extract agent's answer (everything after "Rag_Agent > ")
-                if "Rag_Agent > " in rag_response:
-                    rag_answer = rag_response.split("Rag_Agent > ", 1)[1].strip()
-                    result_dict[item_id] = (rag_answer, None)
+                # The response may contain the full conversation, so we need to extract the last agent response
+                rag_answer = None
+                if isinstance(rag_response, str):
+                    # Find the last occurrence of "Rag_Agent > " or "Rag_Agent>"
+                    last_agent_pos = -1
+                    marker = None
+                    
+                    # Try to find the last "Rag_Agent > " or "Rag_Agent>"
+                    if "Rag_Agent > " in rag_response:
+                        last_agent_pos = rag_response.rfind("Rag_Agent > ")
+                        marker = "Rag_Agent > "
+                    elif "Rag_Agent>" in rag_response:
+                        last_agent_pos = rag_response.rfind("Rag_Agent>")
+                        marker = "Rag_Agent>"
+                    
+                    if last_agent_pos >= 0 and marker:
+                        # Extract everything after the marker
+                        start_pos = last_agent_pos + len(marker)
+                        remaining_text = rag_response[start_pos:].strip()
+                        
+                        # Find where the next section starts (### or User >)
+                        # Try multiple delimiter patterns
+                        next_section_pos = len(remaining_text)
+                        delimiters = [
+                            "\n ### Continue session",
+                            "\n### Continue session", 
+                            "\n ###",
+                            "\n###",
+                            "\nUser >",
+                            "\nUser>",
+                            "\n Continue session",
+                            "\nContinue session"
+                        ]
+                        for delimiter in delimiters:
+                            pos = remaining_text.find(delimiter)
+                            if pos >= 0 and pos < next_section_pos:
+                                next_section_pos = pos
+                        
+                        # Extract the answer
+                        rag_answer = remaining_text[:next_section_pos].strip()
+                        
+                        # Clean up: remove any trailing markers or empty lines
+                        if rag_answer:
+                            rag_answer = "\n".join([line for line in rag_answer.split("\n") if line.strip()]).strip()
+                
+                # If extraction failed but we found "Rag_Agent > ", try a simpler approach
+                if (not rag_answer or len(rag_answer) < 5) and isinstance(rag_response, str):
+                    if "Rag_Agent > " in rag_response:
+                        # Fallback: get everything after the last "Rag_Agent > " until end or next marker
+                        parts = rag_response.rsplit("Rag_Agent > ", 1)
+                        if len(parts) > 1:
+                            potential_answer = parts[1].strip()
+                            # Remove trailing session markers (try various patterns)
+                            markers_to_remove = [
+                                "\n ### Continue session",
+                                "\n### Continue session",
+                                "\n ###",
+                                "\n###",
+                                "\nUser >",
+                                "\nUser>",
+                                "\n Continue session",
+                                "\nContinue session"
+                            ]
+                            for marker in markers_to_remove:
+                                if marker in potential_answer:
+                                    potential_answer = potential_answer.split(marker)[0].strip()
+                                    break
+                            if potential_answer:
+                                rag_answer = potential_answer
+                
+                # Accept answers that are at least 5 characters (reduced from 10 to handle short responses)
+                if rag_answer and len(rag_answer) >= 5:
+                    # Include web search information if available
+                    web_search_info = rag_agent.web_search_calls.copy() if rag_agent.web_search_calls else None
+                    result_dict[item_id] = (rag_answer, None, web_search_info)
                 else:
-                    result_dict[item_id] = (None, "No RAG answer found in response")
+                    # Debug: print what we found to help diagnose
+                    if isinstance(rag_response, str):
+                        has_rag_agent = "Rag_Agent" in rag_response
+                        if has_rag_agent:
+                            # Print a snippet of the response to see what's happening
+                            rag_pos = rag_response.rfind("Rag_Agent")
+                            snippet = rag_response[max(0, rag_pos-50):min(len(rag_response), rag_pos+200)]
+                            print(f"DEBUG item {item_id}: Found Rag_Agent at pos {rag_pos}")
+                            print(f"DEBUG item {item_id}: Response snippet: {repr(snippet)}")
+                            print(f"DEBUG item {item_id}: rag_answer={repr(rag_answer)}, length={len(rag_answer) if rag_answer else 0}")
+                    result_dict[item_id] = (None, "No RAG answer found in response", None)
             except Exception as e:
                 result_dict[item_id] = (None, str(e))
     except Exception as e:
@@ -112,23 +196,39 @@ class Generate:
                 waited += wait_interval
             
             if item_id in rag_result_dict:
-                rag_answer, rag_error = rag_result_dict[item_id]
+                rag_result = rag_result_dict[item_id]
+                # Handle both old format (rag_answer, rag_error) and new format (rag_answer, rag_error, web_search_info)
+                if len(rag_result) == 3:
+                    rag_answer, rag_error, web_search_info = rag_result
+                else:
+                    rag_answer, rag_error = rag_result
+                    web_search_info = None
+                
                 if rag_answer and rag_error is None:
                     enhanced_query = f"{prompt['user']}\n\nadditional context: {rag_answer}"
                     rag_implementation = True
                     rag_status = "successful"
+                    # Store web search information in the item
+                    if web_search_info:
+                        item["RAG_web_search"] = web_search_info
+                        item["RAG_web_search_performed"] = True
+                    else:
+                        item["RAG_web_search_performed"] = False
                 else:
                     print(f"RAG agent failed for item {item_id}: {rag_error}. Using original query.")
                     rag_implementation = False
                     rag_status = rag_error if rag_error else "No RAG answer found in response"
+                    item["RAG_web_search_performed"] = False
             else:
                 print(f"RAG response timeout for item {item_id}. Using original query.")
                 rag_implementation = False
                 rag_status = "timeout"
+                item["RAG_web_search_performed"] = False
         else:
             # RAG queue is None (RAG disabled)
             rag_implementation = False
             rag_status = "rag_disabled"
+            item["RAG_web_search_performed"] = False
         
         if not rag_implementation:
             item["RAG_implementation"] = False

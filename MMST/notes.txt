@@ -1,0 +1,8 @@
+Notes:
+
+1. RAG Agent is running but failing at some point
+    - need to check if web search is being performed or not 
+2. The pipeline is integrated and at least running
+3. After fixing this bug, need to figure out how the images are accessed (mainly ensuring that they're in the
+correct directory)
+4. Running the model on standard dataset
