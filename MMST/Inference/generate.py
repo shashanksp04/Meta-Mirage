@@ -32,101 +32,130 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 break
             
             item_id, query = request
+            print(f"[RAG Worker] Processing item {item_id}: Received query (length: {len(query)} chars)")
             try:
-                # Clear previous web search calls for this item
-                rag_agent.web_search_calls = []
-                # run_debug is async, so we need to await it
-                rag_response = loop.run_until_complete(rag_runner.run_debug(query))
-                # Extract agent's answer (everything after "Rag_Agent > ")
-                # The response may contain the full conversation, so we need to extract the last agent response
-                rag_answer = None
-                if isinstance(rag_response, str):
-                    # Find the last occurrence of "Rag_Agent > " or "Rag_Agent>"
-                    last_agent_pos = -1
-                    marker = None
-                    
-                    # Try to find the last "Rag_Agent > " or "Rag_Agent>"
-                    if "Rag_Agent > " in rag_response:
-                        last_agent_pos = rag_response.rfind("Rag_Agent > ")
-                        marker = "Rag_Agent > "
-                    elif "Rag_Agent>" in rag_response:
-                        last_agent_pos = rag_response.rfind("Rag_Agent>")
-                        marker = "Rag_Agent>"
-                    
-                    if last_agent_pos >= 0 and marker:
-                        # Extract everything after the marker
-                        start_pos = last_agent_pos + len(marker)
-                        remaining_text = rag_response[start_pos:].strip()
-                        
-                        # Find where the next section starts (### or User >)
-                        # Try multiple delimiter patterns
-                        next_section_pos = len(remaining_text)
-                        delimiters = [
-                            "\n ### Continue session",
-                            "\n### Continue session", 
-                            "\n ###",
-                            "\n###",
-                            "\nUser >",
-                            "\nUser>",
-                            "\n Continue session",
-                            "\nContinue session"
-                        ]
-                        for delimiter in delimiters:
-                            pos = remaining_text.find(delimiter)
-                            if pos >= 0 and pos < next_section_pos:
-                                next_section_pos = pos
-                        
-                        # Extract the answer
-                        rag_answer = remaining_text[:next_section_pos].strip()
-                        
-                        # Clean up: remove any trailing markers or empty lines
-                        if rag_answer:
-                            rag_answer = "\n".join([line for line in rag_answer.split("\n") if line.strip()]).strip()
+                print(f"[RAG Worker] Item {item_id}: Starting RAG agent processing...")
+                # Debug: Check if agent has tools registered
+                if hasattr(rag_runner, 'agent'):
+                    try:
+                        # Check tools attribute (the list passed to LlmAgent)
+                        if hasattr(rag_runner.agent, 'tools'):
+                            tools_attr = rag_runner.agent.tools
+                            if tools_attr is not None:
+                                tool_count = len(tools_attr) if isinstance(tools_attr, (list, tuple)) else 0
+                                print(f"[RAG Worker] Item {item_id}: Agent has {tool_count} tool(s) in tools attribute")
+                            else:
+                                print(f"[RAG Worker] Item {item_id}: Agent tools attribute is None")
+                        else:
+                            print(f"[RAG Worker] Item {item_id}: Agent does not have 'tools' attribute")
+                    except Exception as e:
+                        print(f"[RAG Worker] Item {item_id}: Could not check tool count: {e}")
                 
-                # If extraction failed but we found "Rag_Agent > ", try a simpler approach
-                if (not rag_answer or len(rag_answer) < 5) and isinstance(rag_response, str):
-                    if "Rag_Agent > " in rag_response:
-                        # Fallback: get everything after the last "Rag_Agent > " until end or next marker
-                        parts = rag_response.rsplit("Rag_Agent > ", 1)
-                        if len(parts) > 1:
-                            potential_answer = parts[1].strip()
-                            # Remove trailing session markers (try various patterns)
-                            markers_to_remove = [
-                                "\n ### Continue session",
-                                "\n### Continue session",
-                                "\n ###",
-                                "\n###",
-                                "\nUser >",
-                                "\nUser>",
-                                "\n Continue session",
-                                "\nContinue session"
-                            ]
-                            for marker in markers_to_remove:
-                                if marker in potential_answer:
-                                    potential_answer = potential_answer.split(marker)[0].strip()
-                                    break
-                            if potential_answer:
-                                rag_answer = potential_answer
+                # run_debug is async, so we need to await it
+                # Try to use a unique session ID per query to avoid session state issues
+                # If session_id parameter doesn't exist, fall back to default behavior
+                try:
+                    session_id = f"rag_session_{item_id}"
+                    rag_response = loop.run_until_complete(rag_runner.run_debug(query, session_id=session_id))
+                    print(f"[RAG Worker] Item {item_id}: Used session_id={session_id}")
+                except TypeError:
+                    # If session_id parameter doesn't exist, use default behavior (same session)
+                    rag_response = loop.run_until_complete(rag_runner.run_debug(query))
+                    print(f"[RAG Worker] Item {item_id}: Using default session (session_id not supported)")
+                print(f"[RAG Worker] Item {item_id}: RAG agent completed.")
+                print(f"[RAG Worker] Item {item_id}: Response type: {type(rag_response)}")
+                
+                # Extract agent's answer from the response
+                # run_debug returns a list of Event objects, we need to extract text from them
+                rag_answer = None
+                print(f"[RAG Worker] Item {item_id}: Starting response extraction...")
+                
+                if rag_response is None:
+                    print(f"[RAG Worker] Item {item_id}: WARNING - rag_response is None!")
+                elif isinstance(rag_response, list):
+                    print(f"[RAG Worker] Item {item_id}: Response is a list with {len(rag_response)} events")
+                    # Debug: Check all events to see if tools were called
+                    tool_calls_found = []
+                    agent_texts = []
+                    for i, event in enumerate(rag_response):
+                        event_type = type(event).__name__
+                        author = getattr(event, 'author', 'unknown')
+                        print(f"[RAG Worker] Item {item_id}: Event {i}: type={event_type}, author={author}")
+                        
+                        # Check for tool calls in the event
+                        if hasattr(event, 'tool_calls') and event.tool_calls:
+                            print(f"[RAG Worker] Item {item_id}:   → Found {len(event.tool_calls)} tool call(s) in event {i}")
+                            for tc in event.tool_calls:
+                                tool_name = getattr(tc, 'name', 'unknown')
+                                tool_calls_found.append(tool_name)
+                                print(f"[RAG Worker] Item {item_id}:     - Tool: {tool_name}")
+                        
+                        # Check if this is from the Rag_Agent
+                        if author == 'Rag_Agent':
+                            # Extract text from content.parts
+                            if hasattr(event, 'content') and hasattr(event.content, 'parts'):
+                                for part in event.content.parts:
+                                    if hasattr(part, 'text') and part.text:
+                                        agent_texts.append(part.text)
+                    
+                    if tool_calls_found:
+                        print(f"[RAG Worker] Item {item_id}: ✓ Found tool calls: {', '.join(tool_calls_found)}")
+                    else:
+                        print(f"[RAG Worker] Item {item_id}: ✗ WARNING - No tool calls found in any events!")
+                    
+                    if agent_texts:
+                        # Get the last agent response (most recent)
+                        rag_answer = agent_texts[-1].strip()
+                        print(f"[RAG Worker] Item {item_id}: ✓ Extracted agent text from Event objects, length: {len(rag_answer)} chars")
+                    else:
+                        print(f"[RAG Worker] Item {item_id}: WARNING - No agent text found in events!")
+                else:
+                    # Fallback: try to convert to string and extract using regex
+                    rag_response_str = str(rag_response)
+                    print(f"[RAG Worker] Item {item_id}: Response is not a list, trying string extraction...")
+                    import re
+                    # Try to extract text from the string representation (look for text="""...""")
+                    text_match = re.search(r'text="""(.*?)"""', rag_response_str, re.DOTALL)
+                    if text_match:
+                        rag_answer = text_match.group(1).strip()
+                        print(f"[RAG Worker] Item {item_id}: ✓ Extracted text from string representation, length: {len(rag_answer)} chars")
                 
                 # Accept answers that are at least 5 characters (reduced from 10 to handle short responses)
                 if rag_answer and len(rag_answer) >= 5:
-                    # Include web search information if available
-                    web_search_info = rag_agent.web_search_calls.copy() if rag_agent.web_search_calls else None
-                    result_dict[item_id] = (rag_answer, None, web_search_info)
+                    # Check if the response is just a list of tool names (common failure mode)
+                    tool_names = ['extract_keywords', 'web_search', 'ingest_web_content', 'add_web_content', 
+                                 'retrieve_content', 'evaluate_retrieval_confidence', 'add_pdf_content']
+                    rag_answer_lower = rag_answer.lower()
+                    # Count how many tool names appear in the response
+                    tool_name_count = sum(1 for tool_name in tool_names if tool_name.lower() in rag_answer_lower)
+                    
+                    # If the response contains mostly tool names and nothing else, it's likely a failure
+                    if tool_name_count >= 3 and len(rag_answer.split('\n')) <= tool_name_count + 2:
+                        print(f"[RAG Worker] Item {item_id}: ✗ FAILED - Response is just tool names, not actual results")
+                        print(f"[RAG Worker] Item {item_id}:   Response: {repr(rag_answer[:100])}")
+                        result_dict[item_id] = (None, "Agent returned tool names instead of calling tools or returning results", None)
+                    else:
+                        print(f"[RAG Worker] Item {item_id}: ✓ SUCCESS - Extracted valid answer ({len(rag_answer)} chars)")
+                        result_dict[item_id] = (rag_answer, None, None)
                 else:
+                    print(f"[RAG Worker] Item {item_id}: ✗ FAILED - Answer extraction failed")
+                    print(f"[RAG Worker] Item {item_id}:   - rag_answer is None: {rag_answer is None}")
+                    print(f"[RAG Worker] Item {item_id}:   - rag_answer length: {len(rag_answer) if rag_answer else 0}")
                     # Debug: print what we found to help diagnose
-                    if isinstance(rag_response, str):
-                        has_rag_agent = "Rag_Agent" in rag_response
+                    if rag_response_str:
+                        has_rag_agent = "Rag_Agent" in rag_response_str
                         if has_rag_agent:
                             # Print a snippet of the response to see what's happening
-                            rag_pos = rag_response.rfind("Rag_Agent")
-                            snippet = rag_response[max(0, rag_pos-50):min(len(rag_response), rag_pos+200)]
-                            print(f"DEBUG item {item_id}: Found Rag_Agent at pos {rag_pos}")
-                            print(f"DEBUG item {item_id}: Response snippet: {repr(snippet)}")
-                            print(f"DEBUG item {item_id}: rag_answer={repr(rag_answer)}, length={len(rag_answer) if rag_answer else 0}")
+                            rag_pos = rag_response_str.rfind("Rag_Agent")
+                            snippet = rag_response_str[max(0, rag_pos-50):min(len(rag_response_str), rag_pos+200)]
+                            print(f"[RAG Worker] Item {item_id}: DEBUG - Found Rag_Agent at pos {rag_pos}")
+                            print(f"[RAG Worker] Item {item_id}: DEBUG - Response snippet: {repr(snippet)}")
                     result_dict[item_id] = (None, "No RAG answer found in response", None)
             except Exception as e:
-                result_dict[item_id] = (None, str(e))
+                print(f"[RAG Worker] Item {item_id}: ✗ EXCEPTION - Error during processing: {str(e)}")
+                import traceback
+                print(f"[RAG Worker] Item {item_id}: Traceback:\n{traceback.format_exc()}")
+                result_dict[item_id] = (None, str(e), None)
     except Exception as e:
         # If initialization fails, mark all pending requests with error
         print(f"RAG worker initialization failed: {e}")
@@ -197,30 +226,29 @@ class Generate:
             
             if item_id in rag_result_dict:
                 rag_result = rag_result_dict[item_id]
-                # Handle both old format (rag_answer, rag_error) and new format (rag_answer, rag_error, web_search_info)
+                # Handle both old format (rag_answer, rag_error) and new format (rag_answer, rag_error, _)
                 if len(rag_result) == 3:
-                    rag_answer, rag_error, web_search_info = rag_result
+                    rag_answer, rag_error, _ = rag_result
                 else:
                     rag_answer, rag_error = rag_result
-                    web_search_info = None
                 
                 if rag_answer and rag_error is None:
+                    print(f"[Main Process] Item {item_id}: ✓ RAG SUCCESS - Answer received ({len(rag_answer)} chars)")
                     enhanced_query = f"{prompt['user']}\n\nadditional context: {rag_answer}"
                     rag_implementation = True
                     rag_status = "successful"
-                    # Store web search information in the item
-                    if web_search_info:
-                        item["RAG_web_search"] = web_search_info
-                        item["RAG_web_search_performed"] = True
-                    else:
-                        item["RAG_web_search_performed"] = False
+                    item["RAG_web_search_performed"] = False  # Tool success/failure shown in print statements
                 else:
-                    print(f"RAG agent failed for item {item_id}: {rag_error}. Using original query.")
+                    print(f"[Main Process] Item {item_id}: ✗ RAG FAILED - Error: {rag_error}")
+                    print(f"[Main Process] Item {item_id}:   - rag_answer is None: {rag_answer is None}")
+                    print(f"[Main Process] Item {item_id}:   - rag_answer length: {len(rag_answer) if rag_answer else 0}")
+                    print(f"[Main Process] Item {item_id}: Using original query (no RAG enhancement)")
                     rag_implementation = False
                     rag_status = rag_error if rag_error else "No RAG answer found in response"
                     item["RAG_web_search_performed"] = False
             else:
-                print(f"RAG response timeout for item {item_id}. Using original query.")
+                print(f"[Main Process] Item {item_id}: ✗ RAG TIMEOUT - No response after {max_wait_time}s")
+                print(f"[Main Process] Item {item_id}: Using original query (no RAG enhancement)")
                 rag_implementation = False
                 rag_status = "timeout"
                 item["RAG_web_search_performed"] = False

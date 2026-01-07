@@ -26,20 +26,139 @@ class MainAgent:
         self.web_addition = WebAddition(self.collection, self.content_utils, self.null_str, self.null_int)
         self.confidence_evaluator = ConfidenceEvaluator(self.collection, self.content_utils)
         self.keyword_extractor = KeywordExtractor(model_name=test_model, openai_api_base=api_base)
-        # Track web search calls and results
-        self.web_search_calls = []
+        
+        # Store tools for debugging
+        self.tools_list = [
+            self._tracked_retrieve_content,
+            self._tracked_evaluate_confidence,
+            self._tracked_web_search,
+            self._tracked_add_web_content,
+            self._tracked_add_pdf_content,
+            self._tracked_extract_keywords,
+        ]
+    
+    def _tracked_retrieve_content(self, *, query: str, location: str | None = None, 
+                                   month_year: str | None = None, title: str | None = None) -> Dict:
+        """Retrieves relevant content from the vector database using progressive metadata filtering.
+        
+        Use this tool FIRST for every query to retrieve relevant information from the knowledge base.
+        
+        Args:
+            query: The user's query or question
+            location: Optional geographic location filter
+            month_year: Optional temporal filter (format: "MM/YYYY")
+            title: Optional document title filter
+            
+        Returns:
+            Dict with status, results, strategy, and used_filter
+        """
+        import sys
+        print(f"[RAG Tools] retrieve_content: CALLED", flush=True)
+        result = self.retrieve_content(query=query, location=location, month_year=month_year, title=title)
+        status = result.get("status", "unknown")
+        if status == "success":
+            results_count = len(result.get("results", []))
+            print(f"[RAG Tools] ✓ retrieve_content: SUCCESS ({results_count} results)", flush=True)
+        else:
+            print(f"[RAG Tools] ✗ retrieve_content: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
+        return result
+    
+    def _tracked_evaluate_confidence(self, *, query: str, location: Optional[str] = None,
+                                      month_year: Optional[str] = None, title: Optional[str] = None, k: int = 5) -> Dict:
+        """Evaluates confidence of retrieved evidence for a query.
+        
+        Use this tool AFTER calling retrieve_content to determine if the retrieved information is reliable.
+        This is MANDATORY - you MUST call this after every retrieval attempt.
+        
+        Args:
+            query: User query
+            location: Optional geographic filter
+            month_year: Optional temporal filter
+            title: Optional document title filter
+            k: Number of chunks to retrieve (default: 5)
+            
+        Returns:
+            Dict with status, confidence_level ("high"/"medium"/"low"), confidence_score, and diagnostics
+        """
+        import sys
+        print(f"[RAG Tools] evaluate_retrieval_confidence: CALLED", flush=True)
+        result = self.confidence_evaluator.evaluate_retrieval_confidence(
+            query=query, location=location, month_year=month_year, title=title, k=k
+        )
+        status = result.get("status", "unknown")
+        if status == "success":
+            confidence_level = result.get("confidence_level", "unknown")
+            print(f"[RAG Tools] ✓ evaluate_retrieval_confidence: SUCCESS (confidence: {confidence_level})", flush=True)
+        else:
+            print(f"[RAG Tools] ✗ evaluate_retrieval_confidence: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
+        return result
     
     def _tracked_web_search(self, query: str, results_to_extract_count: int = 10) -> Dict:
-        """Wrapper around web_search that tracks calls and results"""
+        """Searches the web for relevant information and extracts clean text.
+        
+        Use this tool ONLY when confidence_level is "low" after evaluating retrieval confidence.
+        This tool searches the web for up-to-date information not available in the knowledge base.
+        
+        Args:
+            query: The search query (use extract_keywords first to optimize the query)
+            results_to_extract_count: Number of web results to retrieve and process (default: 10)
+            
+        Returns:
+            Dict with status, query, results (list of dicts with title, url, text), and error_message if failed
+        """
+        import sys
+        print(f"[RAG Tools] web_search: CALLED (query: {query[:50]}...)", flush=True)
         result = self.web_search.web_search(query, results_to_extract_count)
-        # Store the call information
-        self.web_search_calls.append({
-            "query": query,
-            "status": result.get("status"),
-            "results_count": len(result.get("results", [])) if result.get("status") == "success" else 0,
-            "error": result.get("error_message") if result.get("status") == "error" else None,
-            "results": result.get("results", [])[:3] if result.get("status") == "success" else []  # Store first 3 results
-        })
+        status = result.get("status", "unknown")
+        if status == "success":
+            results_count = len(result.get("results", []))
+            print(f"[RAG Tools] ✓ web_search: SUCCESS ({results_count} results)", flush=True)
+        else:
+            print(f"[RAG Tools] ✗ web_search: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
+        return result
+    
+    def _tracked_add_web_content(self, *, url: str, html: str, location: Optional[str] = None,
+                                 month_year: Optional[str] = None, language: str = "en") -> Dict:
+        """Wrapper around add_web_content that prints success/failure"""
+        result = self.web_addition.add_web_content(url=url, html=html, location=location, 
+                                                   month_year=month_year, language=language)
+        status = result.get("status", "unknown")
+        if status == "success":
+            print(f"[RAG Tools] ✓ add_web_content: SUCCESS")
+        else:
+            print(f"[RAG Tools] ✗ add_web_content: FAILED - {result.get('error_message', 'Unknown error')}")
+        return result
+    
+    def _tracked_add_pdf_content(self, *, pdf_path: str, source_id: str, title: str, language: str = "en") -> Dict:
+        """Wrapper around add_pdf_content that prints success/failure"""
+        result = self.pdf_addition.add_pdf_content(pdf_path=pdf_path, source_id=source_id, 
+                                                    title=title, language=language)
+        status = result.get("status", "unknown")
+        if status == "success":
+            print(f"[RAG Tools] ✓ add_pdf_content: SUCCESS")
+        else:
+            print(f"[RAG Tools] ✗ add_pdf_content: FAILED - {result.get('error_message', 'Unknown error')}")
+        return result
+    
+    def _tracked_extract_keywords(self, *, query: str) -> Dict:
+        """Extracts search-optimized keywords from a query.
+        
+        Use this tool ONLY when confidence_level is "low" to prepare a query for web_search.
+        This tool extracts the most important keywords to improve web search results.
+        
+        Args:
+            query: The original user query
+            
+        Returns:
+            Dict with status, keywords (list of strings), and error_message if failed
+        """
+        result = self.keyword_extractor.extract_keywords(query=query)
+        status = result.get("status", "unknown")
+        if status == "success":
+            keywords_count = len(result.get("keywords", []))
+            print(f"[RAG Tools] ✓ extract_keywords: SUCCESS ({keywords_count} keywords)")
+        else:
+            print(f"[RAG Tools] ✗ extract_keywords: FAILED - {result.get('error_message', 'Unknown error')}")
         return result
 
     def retrieve_content(self,
@@ -90,36 +209,52 @@ class MainAgent:
         # Format model name for google-adk: "openai/model_name" for OpenAI-compatible APIs
         model_name = f"openai/{self.test_model}"
         
+        # Debug: Print tool information
+        print(f"[RAG Agent Init] Creating agent with model: {model_name}")
+        print(f"[RAG Agent Init] Tools to register: {len(self.tools_list)} tools")
+        for i, tool in enumerate(self.tools_list):
+            tool_name = getattr(tool, '__name__', 'unknown')
+            print(f"[RAG Agent Init]   Tool {i+1}: {tool_name}")
+        
         rag_agent = LlmAgent(
             name="Rag_Agent",
             model=model_name,
             description="An agent that retrieves, evaluates, and ingests knowledge.",
             instruction=
-            """You are a retrieval-augmented evidence runner. Your job is NOT to answer the user’s question.
+            """You are a retrieval-augmented evidence runner. Your job is NOT to answer the user's question.
             Your only job is to run the retrieval pipeline and return the exact retrieved text passages (verbatim)
             that are relevant to the user query, so they can be appended to the user query and sent to another model.
 
+            CRITICAL: You MUST use function calling to invoke tools. Do NOT write text responses that look like tool outputs.
+            You MUST actually call the tools using the function calling mechanism provided by the system.
+
             You have access to tools for:
             - Extracting search-optimized keywords from a user query (extract_keywords)
-            - Retrieving information from a vector database (retrieve)
+            - Retrieving information from a vector database (retrieve_content)
             - Evaluating confidence in retrieved evidence (evaluate_retrieval_confidence)
             - Searching the web (web_search)
-            - Ingesting new web content into the database (ingest_web_content)
+            - Ingesting new web content into the database (add_web_content)
 
             ====================
             CORE RULES (MANDATORY)
             ====================
 
-            1. NEVER answer the user’s question.
-            2. ALWAYS attempt retrieval first (vector database).
-            3. AFTER each retrieval attempt, you MUST call evaluate_retrieval_confidence.
-            4. You MUST follow the confidence-based decision rules below.
-            5. Output MUST contain only retrieved text (verbatim) or nothing. No paraphrases, no summaries, no extra facts.
-            6. If evidence is insufficient or not found, explicitly admit it and return no evidence.
+            1. NEVER answer the user's question directly.
+            2. YOU MUST USE TOOLS. Do NOT generate text responses without calling tools first.
+            3. ALWAYS call retrieve_content FIRST (vector database). DO NOT skip this step. DO NOT guess or make up results.
+            4. AFTER calling retrieve_content, you MUST call evaluate_retrieval_confidence. DO NOT guess confidence levels. DO NOT write "CONFIDENCE: low" without actually calling the tool.
+            5. You MUST follow the confidence-based decision rules below.
+            6. Output MUST contain only retrieved text (verbatim) or nothing. No paraphrases, no summaries, no extra facts.
+            7. If evidence is insufficient or not found, explicitly admit it and return no evidence.
+            8. CRITICAL: You MUST call tools using function calling. Do NOT write text responses that look like tool outputs without actually calling the tools.
 
             ===========================
             CONFIDENCE-BASED DECISIONS
             ===========================
+
+            CRITICAL: You MUST call evaluate_retrieval_confidence FIRST before making any decisions.
+            Do NOT write "CONFIDENCE: low" without actually calling the evaluate_retrieval_confidence tool.
+            You MUST use function calling to invoke tools - do NOT just write text that looks like tool outputs.
 
             After calling evaluate_retrieval_confidence, follow these rules:
 
@@ -135,12 +270,12 @@ class MainAgent:
 
             - If confidence_level is "low":
             - Do NOT return evidence yet (unless your pipeline requires showing low-confidence results; default is NO).
-            - Prepare for web search by calling extract_keywords ONCE.
+            - You MUST call extract_keywords ONCE to prepare for web search.
             - Join extracted keywords into a single query string.
-            - Perform web_search.
-            - Ingest relevant web content into the database (ingest_web_content) ONLY from web_search results.
-            - Retrieve again from the vector database.
-            - Evaluate retrieval confidence again.
+            - You MUST call web_search with the extracted keywords.
+            - You MUST call ingest_web_content to add relevant web content to the database (ONLY from web_search results).
+            - You MUST call retrieve_content again from the vector database.
+            - You MUST call evaluate_retrieval_confidence again.
 
             - If confidence remains "low" after ingestion:
             - Do NOT guess.
@@ -210,15 +345,31 @@ class MainAgent:
             It is always acceptable to return no evidence.
             It is never acceptable to hallucinate.
             """,
-            tools=[
-                self.retrieve_content,
-                self.confidence_evaluator.evaluate_retrieval_confidence,
-                self._tracked_web_search,  # Use tracked version to monitor web search calls
-                self.web_addition.add_web_content,
-                self.pdf_addition.add_pdf_content,
-                self.keyword_extractor.extract_keywords,
-            ],
+            tools=self.tools_list,
         )
+        
+        # Debug: Verify tools were registered
+        try:
+            # Check if tools attribute exists (tools list passed to LlmAgent)
+            if hasattr(rag_agent, 'tools'):
+                tools_attr = rag_agent.tools
+                if tools_attr is not None:
+                    tool_count = len(tools_attr) if isinstance(tools_attr, (list, tuple)) else 0
+                    print(f"[RAG Agent Init] Agent has {tool_count} tool(s) in tools attribute")
+                    if tool_count == 0:
+                        print(f"[RAG Agent Init] WARNING: Tools list is empty! Expected {len(self.tools_list)} tools")
+                        print(f"[RAG Agent Init] Tools list passed: {[getattr(t, '__name__', 'unknown') for t in self.tools_list]}")
+                else:
+                    print(f"[RAG Agent Init] Agent tools attribute is None")
+            else:
+                print(f"[RAG Agent Init] WARNING: Agent does not have 'tools' attribute")
+            
+            # List all attributes of the agent to debug
+            print(f"[RAG Agent Init] Agent attributes: {[attr for attr in dir(rag_agent) if not attr.startswith('_')][:20]}")
+        except Exception as e:
+            print(f"[RAG Agent Init] Could not verify tool registration: {e}")
+            import traceback
+            print(f"[RAG Agent Init] Traceback: {traceback.format_exc()}")
 
         runner = InMemoryRunner(agent=rag_agent)
 
