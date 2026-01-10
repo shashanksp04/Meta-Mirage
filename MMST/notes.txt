@@ -1,10 +1,81 @@
 Notes:
 
-1. RAG Agent is running but failing at some point
-    - need to check if web search is being performed or not 
-2. The pipeline is integrated and at least running
-3. After fixing this bug, need to figure out how the images are accessed (mainly ensuring that they're in the
-correct directory)
-4. Running the model on standard dataset
+1. For some records its returning the name of the tools used, fix that
+2. Make sure the doc-string of each function tool aligns with the example shown below
 
 python -m vllm.entrypoints.openai.api_server   --model Qwen/Qwen2.5-VL-3B-Instruct   --host 127.0.0.1   --port 11434   --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser qwen3_xml
+
+future advancements:
+
+- creating agents for individual function : evaluation, retrieval etc. (multi-agent architecture)
+- using the custom databases developed by Tushar
+- using the questions developed by Tushar for keyword extraction
+
+
+def get_exchange_rate(base_currency: str, target_currency: str) -> dict:
+    """Looks up and returns the exchange rate between two currencies.
+
+    Args:
+        base_currency: The ISO 4217 currency code of the currency you
+                       are converting from (e.g., "USD").
+        target_currency: The ISO 4217 currency code of the currency you
+                         are converting to (e.g., "EUR").
+
+    Returns:
+        Dictionary with status and rate information.
+        Success: {"status": "success", "rate": 0.93}
+        Error: {"status": "error", "error_message": "Unsupported currency pair"}
+    """
+
+    # Static data simulating a live exchange rate API
+    # In production, this would call something like: requests.get("api.exchangerates.com")
+    rate_database = {
+        "usd": {
+            "eur": 0.93,  # Euro
+            "jpy": 157.50,  # Japanese Yen
+            "inr": 83.58,  # Indian Rupee
+        }
+    }
+
+    # Input validation and processing
+    base = base_currency.lower()
+    target = target_currency.lower()
+
+    # Return structured result with status
+    rate = rate_database.get(base, {}).get(target)
+    if rate is not None:
+        return {"status": "success", "rate": rate}
+    else:
+        return {
+            "status": "error",
+            "error_message": f"Unsupported currency pair: {base_currency}/{target_currency}",
+        }
+
+
+print("✅ Exchange rate function created")
+print(f"💱 Test: {get_exchange_rate('USD', 'EUR')}")
+
+# Currency agent with custom function tools
+currency_agent = LlmAgent(
+    name="currency_agent",
+    model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config),
+    instruction="""You are a smart currency conversion assistant.
+
+    For currency conversion requests:
+    1. Use `get_fee_for_payment_method()` to find transaction fees
+    2. Use `get_exchange_rate()` to get currency conversion rates
+    3. Check the "status" field in each tool's response for errors
+    4. Calculate the final amount after fees based on the output from `get_fee_for_payment_method` and `get_exchange_rate` methods and provide a clear breakdown.
+    5. First, state the final converted amount.
+        Then, explain how you got that result by showing the intermediate amounts. Your explanation must include: the fee percentage and its
+        value in the original currency, the amount remaining after the fee, and the exchange rate used for the final conversion.
+
+    If any tool returns status "error", explain the issue to the user clearly.
+    """,
+    tools=[get_fee_for_payment_method, get_exchange_rate],
+)
+
+print("✅ Currency agent created with custom function tools")
+print("🔧 Available tools:")
+print("  • get_fee_for_payment_method - Looks up company fee structure")
+print("  • get_exchange_rate - Gets current exchange rates")
