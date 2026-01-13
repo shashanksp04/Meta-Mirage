@@ -117,11 +117,25 @@ class WebAddition:
             "char_count": len(cleaned_text)
         }
 
+    def extract_data(self, URL: str) -> str:
+        downloaded = trafilatura.fetch_url(URL)
+        if not downloaded:
+            return None
+
+        # clean_text = trafilatura.extract(
+        #     downloaded,
+        #     include_comments=False,
+        #     include_tables=False,
+        #     include_links=False,
+        #     favor_recall=False
+        # )
+
+        return downloaded
+        
     def add_web_content(
         self,
         *,
         url: str,
-        html: str,
         location: Optional[str] = None,
         month_year: Optional[str] = None,
         language: str = "en",
@@ -141,7 +155,6 @@ class WebAddition:
 
         Args:
             url: Canonical page URL
-            html: Raw HTML content of the page
             location: Optional geographic context
             month_year: Optional publication date
             language: Language code
@@ -163,8 +176,12 @@ class WebAddition:
               "error_message": str
             }
         """
+        html_url = self.extract_data(url)
 
-        extraction = self.extract_web_page(html=html)
+        if not html_url:
+            return {"status": "error", "error_message": f"Failed to fetch URL: {url}"}
+
+        extraction = self.extract_web_page(html=html_url)
 
         if extraction["status"] != "success":
             return {

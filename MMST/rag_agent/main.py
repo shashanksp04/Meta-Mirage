@@ -8,6 +8,7 @@ from .utils.ContentUtils import ContentUtils
 from .utils.Embedding import SentenceTransformerEmbeddingFunction
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
+from google.adk.models.lite_llm import LiteLlm
 from typing import Optional, Dict, List, Any
 
 
@@ -93,7 +94,7 @@ class MainAgent:
             print(f"[RAG Tools] ✗ evaluate_retrieval_confidence: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
         return result
     
-    def _tracked_web_search(self, query: str, results_to_extract_count: int = 10) -> Dict:
+    def _tracked_web_search(self, *, query: str, results_to_extract_count: int = 10) -> Dict:
         """Searches the web for relevant information and extracts clean text.
         
         Use this tool ONLY when confidence_level is "low" after evaluating retrieval confidence.
@@ -104,7 +105,7 @@ class MainAgent:
             results_to_extract_count: Number of web results to retrieve and process (default: 10)
             
         Returns:
-            Dict with status, query, results (list of dicts with title, url, text), and error_message if failed
+            Dict with status, query, results (list of dicts with title, url), and error_message if failed
         """
         import sys
         print(f"[RAG Tools] web_search: CALLED (query: {query[:50]}...)", flush=True)
@@ -117,10 +118,10 @@ class MainAgent:
             print(f"[RAG Tools] ✗ web_search: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
         return result
     
-    def _tracked_add_web_content(self, *, url: str, html: str, location: Optional[str] = None,
+    def _tracked_add_web_content(self, *, url: str, location: Optional[str] = None,
                                  month_year: Optional[str] = None, language: str = "en") -> Dict:
         """Wrapper around add_web_content that prints success/failure"""
-        result = self.web_addition.add_web_content(url=url, html=html, location=location, 
+        result = self.web_addition.add_web_content(url=url, location=location, 
                                                    month_year=month_year, language=language)
         status = result.get("status", "unknown")
         if status == "success":
@@ -216,9 +217,11 @@ class MainAgent:
             tool_name = getattr(tool, '__name__', 'unknown')
             print(f"[RAG Agent Init]   Tool {i+1}: {tool_name}")
         
+        model_litellm = LiteLlm(model=model_name)
+        
         rag_agent = LlmAgent(
             name="Rag_Agent",
-            model=model_name,
+            model=model_litellm,
             description="An agent that retrieves, evaluates, and ingests knowledge.",
             instruction=
             """You are a retrieval-augmented evidence runner. Your job is NOT to answer the user's question.
@@ -229,20 +232,20 @@ class MainAgent:
             You MUST actually call the tools using the function calling mechanism provided by the system.
 
             You have access to tools for:
-            - Extracting search-optimized keywords from a user query (extract_keywords)
-            - Retrieving information from a vector database (retrieve_content)
-            - Evaluating confidence in retrieved evidence (evaluate_retrieval_confidence)
-            - Searching the web (web_search)
-            - Ingesting new web content into the database (add_web_content)
-
+            - Extracting search-optimized keywords from a user query (_tracked_extract_keywords)
+            - Retrieving information from a vector database (_tracked_retrieve_content)
+            - Evaluating confidence in retrieved evidence (_tracked_evaluate_confidence)
+            - Searching the web (_tracked_web_search)
+            - Ingesting new web content into the database (_tracked_add_web_content)
+            
             ====================
             CORE RULES (MANDATORY)
             ====================
 
             1. NEVER answer the user's question directly.
             2. YOU MUST USE TOOLS. Do NOT generate text responses without calling tools first.
-            3. ALWAYS call retrieve_content FIRST (vector database). DO NOT skip this step. DO NOT guess or make up results.
-            4. AFTER calling retrieve_content, you MUST call evaluate_retrieval_confidence. DO NOT guess confidence levels. DO NOT write "CONFIDENCE: low" without actually calling the tool.
+            3. ALWAYS call _tracked_retrieve_content FIRST (vector database). DO NOT skip this step. DO NOT guess or make up results.
+            4. AFTER calling _tracked_retrieve_content, you MUST call _tracked_evaluate_confidence. DO NOT guess confidence levels. DO NOT write "CONFIDENCE: low" without actually calling the tool.
             5. You MUST follow the confidence-based decision rules below.
             6. Output MUST contain only retrieved text (verbatim) or nothing. No paraphrases, no summaries, no extra facts.
             7. If evidence is insufficient or not found, explicitly admit it and return no evidence.
@@ -252,11 +255,11 @@ class MainAgent:
             CONFIDENCE-BASED DECISIONS
             ===========================
 
-            CRITICAL: You MUST call evaluate_retrieval_confidence FIRST before making any decisions.
-            Do NOT write "CONFIDENCE: low" without actually calling the evaluate_retrieval_confidence tool.
+            CRITICAL: You MUST call _tracked_evaluate_confidence FIRST before making any decisions.
+            Do NOT write "CONFIDENCE: low" without actually calling the _tracked_evaluate_confidence tool.
             You MUST use function calling to invoke tools - do NOT just write text that looks like tool outputs.
 
-            After calling evaluate_retrieval_confidence, follow these rules:
+            After calling _tracked_evaluate_confidence, follow these rules:
 
             - If confidence_level is "high":
             - Do NOT perform web search.
@@ -269,13 +272,13 @@ class MainAgent:
             - Include a brief note: "Confidence: medium" (and nothing else besides the evidence).
 
             - If confidence_level is "low":
-            - Do NOT return evidence yet (unless your pipeline requires showing low-confidence results; default is NO).
-            - You MUST call extract_keywords ONCE to prepare for web search.
+            - Do NOT return evidence yet
+            - You MUST call _tracked_extract_keywords ONCE to prepare for web search.
             - Join extracted keywords into a single query string.
-            - You MUST call web_search with the extracted keywords.
-            - You MUST call ingest_web_content to add relevant web content to the database (ONLY from web_search results).
-            - You MUST call retrieve_content again from the vector database.
-            - You MUST call evaluate_retrieval_confidence again.
+            - You MUST call _tracked_web_search with the extracted keywords.
+            - You MUST call _tracked_add_web_content to add relevant web content to the database (ONLY from web_search results).
+            - You MUST call _tracked_retrieve_content again from the vector database.
+            - You MUST call _tracked_evaluate_confidence again.
 
             - If confidence remains "low" after ingestion:
             - Do NOT guess.
@@ -298,13 +301,13 @@ class MainAgent:
             KEYWORD EXTRACTION
             ===================
 
-            Use extract_keywords ONLY when:
+            Use _tracked_extract_keywords ONLY when:
             - confidence_level is "low", AND
             - you are preparing a query for web_search.
 
             Rules:
-            - Do NOT use extract_keywords if confidence is "high" or "medium".
-            - Call extract_keywords at most once per user query.
+            - Do NOT use _tracked_extract_keywords if confidence is "high" or "medium".
+            - Call _tracked_extract_keywords at most once per user query.
             - If keyword extraction fails, fall back to the original user query for web_search.
 
             ================

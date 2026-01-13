@@ -11,6 +11,80 @@ import argparse
 import time
 from rag_agent.main import MainAgent
 
+# # NEW CODE - Add debug logging to inspect API requests
+# import logging
+# import httpx
+
+# # Enable debug logging to see what's being sent to vLLM
+# logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s')
+
+# # Monkey-patch httpx to log all API requests and responses
+# _original_httpx_post = httpx.AsyncClient.post
+
+# async def _logged_httpx_post(self, *args, **kwargs):
+#     """Log HTTP POST requests to see tool schemas being sent"""
+#     url = args[0] if args else kwargs.get('url', 'unknown')
+#     print(f"\n{'='*80}")
+#     print(f"[HTTP DEBUG] POST to: {url}")
+    
+#     # Log request body if it's JSON
+#     if 'json' in kwargs:
+#         json_body = kwargs['json']
+#         print(f"[HTTP DEBUG] Request JSON keys: {list(json_body.keys())}")
+        
+#         # Log tools if present
+#         if 'tools' in json_body:
+#             tools = json_body['tools']
+#             if tools:
+#                 print(f"[HTTP DEBUG] ✓ Tools present in request: {len(tools)} tool(s)")
+#                 for i, tool in enumerate(tools[:3]):  # Show first 3 tools
+#                     tool_name = tool.get('function', {}).get('name', 'unknown')
+#                     print(f"[HTTP DEBUG]   Tool {i+1}: {tool_name}")
+#                 if len(tools) > 3:
+#                     print(f"[HTTP DEBUG]   ... and {len(tools) - 3} more")
+#             else:
+#                 print(f"[HTTP DEBUG] ✗ WARNING: 'tools' key present but empty!")
+#         else:
+#             print(f"[HTTP DEBUG] ✗ WARNING: No 'tools' key in request!")
+        
+#         # Log messages
+#         if 'messages' in json_body:
+#             messages = json_body['messages']
+#             print(f"[HTTP DEBUG] Messages: {len(messages)} message(s)")
+    
+#     # Make the actual request
+#     response = await _original_httpx_post(self, *args, **kwargs)
+    
+#     # Log response
+#     print(f"[HTTP DEBUG] Response status: {response.status_code}")
+#     try:
+#         resp_json = response.json()
+#         if 'choices' in resp_json:
+#             choice = resp_json['choices'][0]
+#             message = choice.get('message', {})
+            
+#             # Check for tool calls in response
+#             if 'tool_calls' in message and message['tool_calls']:
+#                 print(f"[HTTP DEBUG] ✓ Response contains {len(message['tool_calls'])} tool call(s)")
+#                 for tc in message['tool_calls'][:3]:
+#                     print(f"[HTTP DEBUG]   - {tc.get('function', {}).get('name', 'unknown')}")
+#             else:
+#                 # Check if response is just text
+#                 content = message.get('content', '')
+#                 if content:
+#                     print(f"[HTTP DEBUG] ✗ Response is text only (no tool calls): {content[:100]}...")
+#                 else:
+#                     print(f"[HTTP DEBUG] ✗ Response has no content or tool calls")
+#     except Exception as e:
+#         print(f"[HTTP DEBUG] Could not parse response JSON: {e}")
+    
+#     print(f"{'='*80}\n")
+#     return response
+
+# # Apply the monkey patch
+# httpx.AsyncClient.post = _logged_httpx_post
+# # END NEW CODE
+
 # Global RAG worker function for multiprocessing
 def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, device, api_base):
     """Separate process that handles all RAG requests to avoid multiple model loads"""
@@ -25,6 +99,9 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
         # Create event loop for this process
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        request_count = 0
+        RESTART_INTERVAL = 1000
         
         while True:
             request = rag_queue.get()
@@ -32,6 +109,17 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 break
             
             item_id, query = request
+
+            request_count += 1
+            if request_count % RESTART_INTERVAL == 0:
+                print(f"[RAG Worker] Item {item_id}: ⟳ Recreating agent after {request_count} requests...")
+                try:
+                    rag_agent = MainAgent(test_model=test_model, embed_model_name=embed_model_name, device=device, api_base=api_base)
+                    rag_runner = rag_agent.main()
+                    print(f"[RAG Worker] Item {item_id}: ✓ Agent recreated successfully")
+                except Exception as e:
+                    print(f"[RAG Worker] Item {item_id}: ✗ Failed to recreate agent: {e}")
+
             print(f"[RAG Worker] Processing item {item_id}: Received query (length: {len(query)} chars)")
             try:
                 print(f"[RAG Worker] Item {item_id}: Starting RAG agent processing...")
@@ -56,6 +144,7 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 # If session_id parameter doesn't exist, fall back to default behavior
                 try:
                     session_id = f"rag_session_{item_id}"
+                    # session_id = "rag_session_shared"
                     rag_response = loop.run_until_complete(rag_runner.run_debug(query, session_id=session_id))
                     print(f"[RAG Worker] Item {item_id}: Used session_id={session_id}")
                 except TypeError:
@@ -68,6 +157,7 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 # Extract agent's answer from the response
                 # run_debug returns a list of Event objects, we need to extract text from them
                 rag_answer = None
+                web_search_performed = False  # Initialize web_search_performed flag
                 print(f"[RAG Worker] Item {item_id}: Starting response extraction...")
                 
                 if rag_response is None:
@@ -103,6 +193,11 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                     else:
                         print(f"[RAG Worker] Item {item_id}: ✗ WARNING - No tool calls found in any events!")
                     
+                    # Check if web_search was performed
+                    web_search_performed = 'web_search' in tool_calls_found or '_tracked_web_search' in tool_calls_found
+                    if web_search_performed:
+                        print(f"[RAG Worker] Item {item_id}: ✓ Web search was performed")
+                    
                     if agent_texts:
                         # Get the last agent response (most recent)
                         rag_answer = agent_texts[-1].strip()
@@ -113,6 +208,10 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                     # Fallback: try to convert to string and extract using regex
                     rag_response_str = str(rag_response)
                     print(f"[RAG Worker] Item {item_id}: Response is not a list, trying string extraction...")
+                    # Check if web_search appears in string representation (fallback detection)
+                    if 'web_search' in rag_response_str.lower() or '_tracked_web_search' in rag_response_str:
+                        web_search_performed = True
+                        print(f"[RAG Worker] Item {item_id}: ✓ Web search detected in string representation")
                     import re
                     # Try to extract text from the string representation (look for text="""...""")
                     text_match = re.search(r'text="""(.*?)"""', rag_response_str, re.DOTALL)
@@ -133,10 +232,10 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                     if tool_name_count >= 3 and len(rag_answer.split('\n')) <= tool_name_count + 2:
                         print(f"[RAG Worker] Item {item_id}: ✗ FAILED - Response is just tool names, not actual results")
                         print(f"[RAG Worker] Item {item_id}:   Response: {repr(rag_answer[:100])}")
-                        result_dict[item_id] = (None, "Agent returned tool names instead of calling tools or returning results", None)
+                        result_dict[item_id] = (None, "Agent returned tool names instead of calling tools or returning results", False)
                     else:
                         print(f"[RAG Worker] Item {item_id}: ✓ SUCCESS - Extracted valid answer ({len(rag_answer)} chars)")
-                        result_dict[item_id] = (rag_answer, None, None)
+                        result_dict[item_id] = (rag_answer, None, web_search_performed)
                 else:
                     print(f"[RAG Worker] Item {item_id}: ✗ FAILED - Answer extraction failed")
                     print(f"[RAG Worker] Item {item_id}:   - rag_answer is None: {rag_answer is None}")
@@ -150,12 +249,12 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                             snippet = rag_response_str[max(0, rag_pos-50):min(len(rag_response_str), rag_pos+200)]
                             print(f"[RAG Worker] Item {item_id}: DEBUG - Found Rag_Agent at pos {rag_pos}")
                             print(f"[RAG Worker] Item {item_id}: DEBUG - Response snippet: {repr(snippet)}")
-                    result_dict[item_id] = (None, "No RAG answer found in response", None)
+                    result_dict[item_id] = (None, "No RAG answer found in response", False)
             except Exception as e:
                 print(f"[RAG Worker] Item {item_id}: ✗ EXCEPTION - Error during processing: {str(e)}")
                 import traceback
                 print(f"[RAG Worker] Item {item_id}: Traceback:\n{traceback.format_exc()}")
-                result_dict[item_id] = (None, str(e), None)
+                result_dict[item_id] = (None, str(e), False)
     except Exception as e:
         # If initialization fails, mark all pending requests with error
         print(f"RAG worker initialization failed: {e}")
@@ -165,7 +264,7 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 if request is None:
                     break
                 item_id, _ = request
-                result_dict[item_id] = (None, f"RAG worker initialization failed: {str(e)}")
+                result_dict[item_id] = (None, f"RAG worker initialization failed: {str(e)}", False)
             except:
                 break
 
@@ -226,18 +325,22 @@ class Generate:
             
             if item_id in rag_result_dict:
                 rag_result = rag_result_dict[item_id]
-                # Handle both old format (rag_answer, rag_error) and new format (rag_answer, rag_error, _)
+                # Handle both old format (rag_answer, rag_error) and new format (rag_answer, rag_error, web_search_performed)
                 if len(rag_result) == 3:
-                    rag_answer, rag_error, _ = rag_result
+                    rag_answer, rag_error, web_search_performed = rag_result
                 else:
+                    # Old format without web_search_performed flag
                     rag_answer, rag_error = rag_result
+                    web_search_performed = False
                 
                 if rag_answer and rag_error is None:
                     print(f"[Main Process] Item {item_id}: ✓ RAG SUCCESS - Answer received ({len(rag_answer)} chars)")
                     enhanced_query = f"{prompt['user']}\n\nadditional context: {rag_answer}"
                     rag_implementation = True
                     rag_status = "successful"
-                    item["RAG_web_search_performed"] = False  # Tool success/failure shown in print statements
+                    item["RAG_web_search_performed"] = web_search_performed
+                    if web_search_performed:
+                        print(f"[Main Process] Item {item_id}: ✓ Web search was performed during RAG")
                 else:
                     print(f"[Main Process] Item {item_id}: ✗ RAG FAILED - Error: {rag_error}")
                     print(f"[Main Process] Item {item_id}:   - rag_answer is None: {rag_answer is None}")

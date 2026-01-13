@@ -3,7 +3,7 @@ Notes:
 1. For some records its returning the name of the tools used, fix that
 2. Make sure the doc-string of each function tool aligns with the example shown below
 
-python -m vllm.entrypoints.openai.api_server   --model Qwen/Qwen2.5-VL-3B-Instruct   --host 127.0.0.1   --port 11434   --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser qwen3_xml
+python -m vllm.entrypoints.openai.api_server   --model Qwen/Qwen2.5-VL-7B-Instruct   --host 127.0.0.1   --port 11434   --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser qwen3_xml
 
 future advancements:
 
@@ -79,3 +79,207 @@ print("✅ Currency agent created with custom function tools")
 print("🔧 Available tools:")
 print("  • get_fee_for_payment_method - Looks up company fee structure")
 print("  • get_exchange_rate - Gets current exchange rates")
+
+
+
+https://chatgpt.com/share/6966d378-241c-800c-a036-a61809082478
+
+Here’s a **clean, technical, copy-paste-ready summary** of what’s going wrong and why, written the way you’d want it in engineering notes.
+
+---
+
+## Issue Summary: Qwen2.5-VL with vLLM + ADK does not execute tool calls
+
+### Symptom
+
+The RAG agent **never executes tools**, even though:
+
+* `rag_agent.tools` contains 6 tools
+* The model appears to “call” tools by outputting text like:
+
+  ```
+  _tracked_extract_keywords("query text")
+  ```
+* The worker explicitly reports:
+
+  ```
+  WARNING - No tool calls found in any events!
+  ```
+
+No tool wrapper logs (e.g. `[RAG Tools] retrieve_content: CALLED`) ever appear.
+
+---
+
+## What Is Actually Happening
+
+1. **The model is NOT making real tool calls**
+
+   * It is emitting **plain text** that *looks like* a function call
+   * This text is placed in `message.content`, not in a structured `tool_calls` field
+
+2. **vLLM never detects a tool call**
+
+   * The vLLM tool-call parser does not recognize the model’s output as a valid tool invocation
+   * Therefore:
+
+     * `tool_calls = []`
+     * ADK never executes any Python tools
+     * The agent falls back to returning free-text answers
+
+3. **ADK correctly registers tools, but never receives tool events**
+
+   * Confirmed by logs:
+
+     ```
+     Agent has 6 tool(s) in tools attribute
+     ```
+   * But later:
+
+     ```
+     WARNING - No tool calls found in any events!
+     ```
+
+---
+
+## Root Cause (Primary)
+
+### ❌ Tool-call parser mismatch with model output format
+
+The model is served as:
+
+```bash
+Qwen/Qwen2.5-VL-7B-Instruct
+```
+
+But vLLM is run with:
+
+```bash
+--tool-call-parser qwen3_xml
+```
+
+This causes a **format mismatch**:
+
+* `qwen3_xml` expects **explicit XML-wrapped tool calls**, e.g.
+
+  ```xml
+  <tool_call>
+  {"name":"tool_name","arguments":{...}}
+  </tool_call>
+  ```
+* Qwen2.5-VL is **not being forced** (by prompt or template) to emit that format
+* Instead, it emits:
+
+  ```text
+  _tracked_extract_keywords("...")
+  ```
+
+Because this does not match the parser’s expected syntax, vLLM:
+
+* Treats it as normal text
+* Does not populate `tool_calls`
+* ADK never runs the tool
+
+---
+
+## Secondary Contributors
+
+### 1. Tool calls are not strictly enforced in the prompt
+
+* The instruction says “you MUST call tools”
+* But does **not define the exact serialization format**
+* LLMs default to “best-effort imitation” unless format is rigidly specified
+
+### 2. Auto tool choice is enabled, but not sufficient
+
+```bash
+--enable-auto-tool-choice
+```
+
+* This only allows tool calling
+* It does **not** force correct formatting
+* The model can still choose to respond in plain text
+
+### 3. ADK + LiteLLM expect structured tool calls
+
+* They do **not** execute tools from strings in `content`
+* Only structured `tool_calls` / `function_call` events trigger execution
+
+---
+
+## Confirming Evidence from Logs
+
+* Every event shows:
+
+  ```
+  WARNING - No tool calls found in any events!
+  ```
+* Tool-looking outputs appear only as text:
+
+  ```
+  Rag_Agent > _tracked_extract_keywords("...")
+  ```
+* No wrapper logs like:
+
+  ```
+  [RAG Tools] retrieve_content: CALLED
+  ```
+
+This definitively proves tools are **never executed**.
+
+---
+
+## Known Consequences
+
+Because tools never run:
+
+* ❌ Vector DB retrieval never happens
+* ❌ Confidence evaluation never runs
+* ❌ Web search never executes
+* ❌ The agent violates its own instruction (answers directly)
+* ❌ RAG becomes a plain LLM responder
+
+---
+
+## Additional Bug Discovered (Unrelated but Blocking Web Search)
+
+In `WebSearch.web_search()`:
+
+* A hardcoded API key exists
+* BUT execution still checks:
+
+  ```python
+  if not self.api_key:
+      return error "Missing YOU_API_KEY"
+  ```
+* Result: `web_search` always fails unless env var is set
+* Even when a key string exists in code
+
+---
+
+## Required Fixes (High Level)
+
+### Fix 1 (Critical): Align tool-call format with parser
+
+You must **either**:
+
+* Force Qwen2.5-VL to emit `<tool_call>...</tool_call>` exactly
+  **or**
+* Switch to a parser (e.g. `openai`) that matches your tool-calling style
+
+### Fix 2: Explicitly define tool-call serialization in the instruction
+
+Tool calls must be:
+
+* The **only output**
+* In the **exact format expected by the parser**
+* With no surrounding text
+
+### Fix 3: Remove blocking env-var check in `web_search`
+
+If you intend to ignore env vars, do not gate execution on them.
+
+---
+
+## One-Line Diagnosis
+
+> **The model is printing fake tool calls as text, but vLLM cannot parse them into real tool invocations due to a parser/format mismatch, so ADK never executes any tools.**

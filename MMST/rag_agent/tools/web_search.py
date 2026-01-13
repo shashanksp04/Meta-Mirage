@@ -19,15 +19,15 @@ class WebSearch:
         if not downloaded:
             return None
 
-        clean_text = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=False,
-            include_links=False,
-            favor_recall=False
-        )
+        # clean_text = trafilatura.extract(
+        #     downloaded,
+        #     include_comments=False,
+        #     include_tables=False,
+        #     include_links=False,
+        #     favor_recall=False
+        # )
 
-        return clean_text
+        return downloaded
 
     def web_search(self, query: str, results_to_extract_count: int = 10) -> Dict:
         """Searches the web for relevant information and extracts clean text.
@@ -48,7 +48,6 @@ class WebSearch:
                     {
                         "title": "...",
                         "url": "...",
-                        "cleaned_extracted_text": "..."
                     }
                 ]
             }
@@ -63,11 +62,11 @@ class WebSearch:
         # 🔐 Replace with your actual You.com API key
         API_KEY = "ydc-sk-988fe646a127e2ca-zHOgmT2slT02L28HZttsS5FuHH8VH3Nk-2c7423e1"
 
-        if not self.api_key:
-            return {
-                "status": "error",
-                "error_message": "Missing YOU_API_KEY environment variable"
-            }
+        # if not self.api_key:
+        #     return {
+        #         "status": "error",
+        #         "error_message": "Missing YOU_API_KEY environment variable"
+        #     }
 
 
         # 🌐 Endpoint
@@ -81,7 +80,7 @@ class WebSearch:
 
         # 📤 Headers
         headers = {
-            "X-API-Key": self.api_key
+            "X-API-Key": API_KEY
         }
 
         # 🚀 Send GET request
@@ -121,21 +120,26 @@ class WebSearch:
             url = item.get("url")
             if not url:
                 continue
-
-            extracted_text = self.extract_data(url)
-
-            if not extracted_text:
-                results.append({
+            
+            results.append({
                     "title": item.get("title"),
                     "url": item.get("url"),
-                    "cleaned_extracted_text": "NOTHING EXTRACTED"
                 })
-            else:
-                results.append({
-                    "title": item.get("title"),
-                    "url": item.get("url"),
-                    "cleaned_extracted_text": extracted_text
-                })
+
+            # extracted_text = self.extract_data(url)
+
+            # if not extracted_text:
+            #     results.append({
+            #         "title": item.get("title"),
+            #         "url": item.get("url"),
+            #         "html": "NOTHING EXTRACTED"
+            #     })
+            # else:
+            #     results.append({
+            #         "title": item.get("title"),
+            #         "url": item.get("url"),
+            #         "html": extracted_text
+            #     })
 
 
 
