@@ -173,9 +173,10 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                         print(f"[RAG Worker] Item {item_id}: Event {i}: type={event_type}, author={author}")
                         
                         # Check for tool calls in the event
-                        if hasattr(event, 'tool_calls') and event.tool_calls:
-                            print(f"[RAG Worker] Item {item_id}:   → Found {len(event.tool_calls)} tool call(s) in event {i}")
-                            for tc in event.tool_calls:
+                        function_calls = event.get_function_calls()
+                        if function_calls:
+                            print(f"[RAG Worker] Item {item_id}:   → Found {len(function_calls)} tool call(s) in event {i}")
+                            for tc in function_calls:
                                 tool_name = getattr(tc, 'name', 'unknown')
                                 tool_calls_found.append(tool_name)
                                 print(f"[RAG Worker] Item {item_id}:     - Tool: {tool_name}")
@@ -222,14 +223,16 @@ def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, dev
                 # Accept answers that are at least 5 characters (reduced from 10 to handle short responses)
                 if rag_answer and len(rag_answer) >= 5:
                     # Check if the response is just a list of tool names (common failure mode)
-                    tool_names = ['extract_keywords', 'web_search', 'ingest_web_content', 'add_web_content', 
-                                 'retrieve_content', 'evaluate_retrieval_confidence', 'add_pdf_content']
+                    tool_names = ['_tracked_retrieve_content', '_tracked_evaluate_confidence', 
+                    '_tracked_web_search', '_tracked_add_web_content', '_tracked_add_pdf_content', 
+                    '_tracked_extract_keywords']
+
                     rag_answer_lower = rag_answer.lower()
                     # Count how many tool names appear in the response
                     tool_name_count = sum(1 for tool_name in tool_names if tool_name.lower() in rag_answer_lower)
                     
                     # If the response contains mostly tool names and nothing else, it's likely a failure
-                    if tool_name_count >= 3 and len(rag_answer.split('\n')) <= tool_name_count + 2:
+                    if tool_name_count >= 1 and len(rag_answer.split('\n')) <= tool_name_count + 2:
                         print(f"[RAG Worker] Item {item_id}: ✗ FAILED - Response is just tool names, not actual results")
                         print(f"[RAG Worker] Item {item_id}:   Response: {repr(rag_answer[:100])}")
                         result_dict[item_id] = (None, "Agent returned tool names instead of calling tools or returning results", False)

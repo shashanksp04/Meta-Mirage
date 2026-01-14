@@ -13,7 +13,7 @@ from typing import Optional, Dict, List, Any
 
 
 class MainAgent:
-    def __init__(self, test_model: str = "Qwen2.5-VL-3B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None", api_base: str = "http://127.0.0.1:11434/v1"):
+    def __init__(self, test_model: str = "Qwen2.5-VL-7B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None", api_base: str = "http://127.0.0.1:11434/v1"):
         self.test_model = test_model
         self.api_base = api_base
         self.embedding_function = SentenceTransformerEmbeddingFunction(embed_model_name, device)

@@ -1,3 +1,9 @@
+For memory problem on NCSA
+
+run du -sh ~/.??* | sort -h
+
+generall cache is the main problem so clear it by rm -rf ~/.cache
+
 Before running:
 # 1. Check disk space
 df -h /path/to/output/directory
