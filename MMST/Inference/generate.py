@@ -1,4 +1,6 @@
+import pysqlite3
 import sys
+sys.modules["sqlite3"] = pysqlite3
 sys.path.append('../')
 from chat_models.OpenAI_Chat import OpenAI_Chat
 from chat_models.Client import Client
@@ -9,7 +11,6 @@ import os
 from tqdm import tqdm
 import argparse
 import time
-from rag_agent.main import MainAgent
 
 # # NEW CODE - Add debug logging to inspect API requests
 # import logging
@@ -89,11 +90,13 @@ from rag_agent.main import MainAgent
 def rag_worker_process(rag_queue, result_dict, test_model, embed_model_name, device, api_base):
     """Separate process that handles all RAG requests to avoid multiple model loads"""
     import asyncio
+    from rag_agent.main import MainAgent
     try:
         # Use default port 11434 if api_base is empty
         if not api_base or api_base == "":
             api_base = "http://127.0.0.1:11434/v1"
         rag_agent = MainAgent(test_model=test_model, embed_model_name=embed_model_name, device=device, api_base=api_base)
+        rag_agent.reset_collection()
         rag_runner = rag_agent.main()
         
         # Create event loop for this process
@@ -302,6 +305,15 @@ class Generate:
             new_images.append(new_path)
         return {"user": user_prompt, "images": new_images}
 
+    def safe_qsize(self, q):
+        try:
+            return q.qsize()
+        except (NotImplementedError, AttributeError):
+            return 0
+        except Exception:
+            return 0
+
+
     # Function to handle item processing
     def process_item(self, args):
         item, model_name, output_file, lock, rag_queue, rag_result_dict = args
@@ -317,9 +329,12 @@ class Generate:
         rag_implementation = False  # Will be True if RAG succeeds
         rag_status = None  # Will contain "successful" or error message
         if rag_queue is not None:
+            qsize = self.safe_qsize(rag_queue)
             rag_queue.put((item_id, prompt["user"]))
             # Wait for RAG response (with timeout)
-            max_wait_time = 60  # seconds
+            base_timeout = 60
+            extra = 5 * max(0, qsize)  # 5s per queued request (tune)
+            max_wait_time = base_timeout + extra
             wait_interval = 0.1  # seconds
             waited = 0
             while item_id not in rag_result_dict and waited < max_wait_time:
@@ -417,66 +432,100 @@ class Generate:
 
     def generate(self):
         # Read the raw data file
-        with open(self.raw_data_file, "r", encoding='utf-8') as f:
+        with open(self.raw_data_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         # Check if the output file exists and read processed items
         processed_ids = set()
         if os.path.exists(self.output_file):
-            with open(self.output_file, "r", encoding='utf-8') as f:
+            with open(self.output_file, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
                         item = json.loads(line)
-                        if self.model_name in item and item[self.model_name] != -1 and item[self.model_name] != None:
-                            processed_ids.add(item['id'])
+                        if self.model_name in item and item[self.model_name] != -1 and item[self.model_name] is not None:
+                            processed_ids.add(item["id"])
                     except json.JSONDecodeError:
                         # Handle potentially corrupt JSON lines
                         continue
-                    
+
         total_items = len(data)
         already_processed = len(processed_ids)
-        items_to_process = [item for item in data if item.get('id') not in processed_ids]
+        items_to_process = [item for item in data if item.get("id") not in processed_ids]
 
         if already_processed > 0:
-            print(f"Resuming processing: {already_processed} items already completed, {len(items_to_process)} items remaining.")
+            print(
+                f"Resuming processing: {already_processed} items already completed, "
+                f"{len(items_to_process)} items remaining."
+            )
         else:
             print(f"Starting fresh: Processing {len(items_to_process)} items.")
-        
+
         if items_to_process:
-            manager = multiprocessing.Manager()
+            # IMPORTANT: use spawn context to avoid CUDA + fork issues
+            ctx = multiprocessing.get_context("spawn")
+
+            manager = ctx.Manager()
             lock = manager.Lock()
             rag_queue = manager.Queue()
             rag_result_dict = manager.dict()  # Shared dict to store RAG results
-            
+
             # Start RAG worker process (single instance to save GPU memory)
-            rag_process = multiprocessing.Process(
+            rag_process = ctx.Process(
                 target=rag_worker_process,
-                args=(rag_queue, rag_result_dict, self.test_model, self.embed_model_name, self.device, self.openai_api_base)
+                args=(
+                    rag_queue,
+                    rag_result_dict,
+                    self.test_model,
+                    self.embed_model_name,
+                    self.device,
+                    self.openai_api_base,
+                ),
             )
             rag_process.start()
-            
+
             # Initialize the process pool with the specified number of processes
-            pool = multiprocessing.Pool(processes=self.num_processes)
-            args_list = [(item, self.model_name, self.output_file, lock, rag_queue, rag_result_dict) for item in items_to_process]
-            
+            pool = ctx.Pool(processes=self.num_processes)
+            args_list = [
+                (item, self.model_name, self.output_file, lock, rag_queue, rag_result_dict)
+                for item in items_to_process
+            ]
+
             # Use tqdm to show progress
             try:
-                for _ in tqdm(pool.imap_unordered(self.process_item, args_list), total=len(args_list), desc="Processing items"):
+                for _ in tqdm(
+                    pool.imap_unordered(self.process_item, args_list),
+                    total=len(args_list),
+                    desc="Processing items",
+                ):
                     pass
             finally:
                 # Signal RAG worker to stop
-                rag_queue.put(None)
-                pool.close()
-                pool.join()
-                rag_process.join(timeout=30)  # Wait for RAG worker to finish
+                try:
+                    rag_queue.put(None)
+                except Exception:
+                    pass
+
+                # Cleanly close the pool
+                try:
+                    pool.close()
+                except Exception:
+                    pass
+                try:
+                    pool.join()
+                except Exception:
+                    pass
+
+                # Wait for RAG worker to finish
+                rag_process.join(timeout=30)
                 if rag_process.is_alive():
                     print("RAG worker did not terminate gracefully, forcing termination...")
                     rag_process.terminate()
                     rag_process.join()
-        
+
         print("Processing completed.")
-        print(f"Summary: {len(processed_ids)} items processed, {len(items_to_process)} items remaining.")
+        print(f"Summary: {already_processed} items processed, {len(items_to_process)} items remaining.")
         self.cleanup_output(len(data))
+
 
     def cleanup_output(self, data_length):
         valid_items = []
@@ -497,6 +546,7 @@ class Generate:
         print(f"Total successful items: {len(valid_items)}. \n Remaining items to process: {data_length - len(valid_items)}.")
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
     parser = argparse.ArgumentParser(description="Generate responses using LLMs model.")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input JSON file.")
     parser.add_argument("--output_file", type=str, required=True, help="Path to the output JSONL file.")

@@ -90,8 +90,7 @@ class WebAddition:
             html,
             include_comments = False,
             include_tables = False,
-            include_links = False,
-            include_recall = False
+            include_links = False
             )
 
         if not extracted:

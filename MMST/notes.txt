@@ -1,9 +1,135 @@
-Notes:
+## when running models:
 
-1. For some records its returning the name of the tools used, fix that
-2. Make sure the doc-string of each function tool aligns with the example shown below
+# Set all 8 GPUs to be visible
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
+# Start SGLang with optimal settings for H200
+python -m sglang.launch_server \
+  --model-path meta-llama/Llama-3.2-11B-Vision-Instruct \
+  --host 127.0.0.1 \
+  --port 11434 \
+  --tensor-parallel-size 8 \
+  --tool-call-parser llama3 \
+  --enable-multimodal \
+  --trust-remote-code \
+  --mem-fraction-static 0.9 \
+  --max-total-tokens 32768
+
+# To start with vllm
 python -m vllm.entrypoints.openai.api_server   --model Qwen/Qwen2.5-VL-7B-Instruct   --host 127.0.0.1   --port 11434   --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --chat-template ./chat_template.jinja
+
+
+Current Errors to handle:
+Here are the major bugs/patterns I see in your trace (grouped by impact):
+
+## 1) `_tracked_extract_keywords` is fundamentally unreliable (and causes cascaded bad behavior)
+
+* It fails constantly: **“Model did not return a valid JSON list.”**
+* It’s called **multiple times per item** even after failing once (wasted tokens + latency).
+* When it fails, your agent sometimes falls back, but other times it still proceeds in a way that doesn’t improve search quality (e.g., generic web queries like “insect identification…”).
+
+**Impact:** poorer web queries + extra tool calls + more latency → contributes to timeouts.
+
+## 2) The agent sometimes “prints tool calls” instead of actually calling tools (tool-calling contract break)
+
+Example failure:
+
+* For item `#883270` / `#889142` / `#887031` / `#888009`, the extracted “answer” is basically:
+
+  * `"Confidence: medium"\n\n{"name": "_tracked_retrieve_content", "parameters": {...}}`
+
+Your response extractor flags it correctly: **“Response is just tool names, not actual results.”**
+
+**Root cause:** your model is not reliably in “tool-calling mode” (or the wrapper isn’t enforcing tool calls). It’s emitting *a textual representation* of a tool call rather than using the tool interface.
+
+**Impact:** hard failures (no usable answer) and/or downstream “fallback to original query”.
+
+## 3) Massive timeout rate: the agent often never produces a final answer event
+
+You have tons of:
+
+* `RAG TIMEOUT - No response after 60s / 70s / 110s / 115s`
+
+But you also show cases where the agent produced a long answer (5k–20k chars) fine.
+
+**Likely causes (not mutually exclusive):**
+
+* **Runaway loops**: repeated tool calls (keywords → web → add → retrieve → confidence → keywords → …) without a clear “stop when good enough”.
+* **No hard budget** on tool calls / iterations per item.
+* **Slow tools** (web extraction, PDF parsing) and no early exit.
+* **Model sometimes stalls** due to long context after you add large web page content (your evidence blocks are huge).
+
+**Impact:** throughput collapse on a benchmark; majority items revert to “original query”.
+
+## 4) Retrieval contamination / irrelevant evidence being reused across unrelated questions
+
+You repeatedly see “Maple Tree Diseases and How to Treat Them” show up as EVIDENCE for:
+
+* insect ID,
+* shade perennials,
+* bug with proboscis,
+* hops variety,
+  etc.
+
+That suggests your “RAG memory/store” is:
+
+* not scoped to the current query,
+* or retrieval is weighted too heavily toward a previously-added chunk,
+* or dedup/indexing is broken.
+
+**Impact:** wrong answers even when you *don’t* timeout.
+
+## 5) `retrieve_content` often returns “No results found” even after web_search succeeded
+
+Example:
+
+* `web_search SUCCESS (10 results)`
+* `add_web_content SUCCESS`
+* then `retrieve_content FAILED - No results found`
+
+That’s a serious integration mismatch: you added web content, but retrieval can’t find it, likely because:
+
+* add_web_content isn’t indexing under the same namespace/store that retrieve_content queries,
+* or the stored fields don’t match the query field you use,
+* or retrieval filtering (location/month_year/title) is inadvertently excluding everything.
+
+**Impact:** the agent can’t ground answers and stays low-confidence or loops.
+
+## 6) `add_web_content` failures reduce grounding and increase looping
+
+You have:
+
+* `add_web_content: FAILED - Web extraction failed: no_main_content`
+* `FAILED - No new content to add after deduplication`
+
+If “no_main_content” happens frequently, your web extractor is too brittle (modern sites, cookie walls, dynamic pages). If dedup nukes everything, your dedup key is too aggressive (e.g., same domain, same title, or same URL normalization).
+
+**Impact:** the agent keeps searching but never improves retrieval, leading to timeouts/low confidence.
+
+## 7) Response extraction is accepting junk “answers” (e.g., 17 chars)
+
+Item `#885475` yields an “answer” of length **17 chars**:
+
+* basically `"Confidence: low"` is treated as a valid answer by the extraction step.
+
+Your log even says:
+
+* “✓ SUCCESS - Extracted valid answer (17 chars)”
+
+That’s a bug in the “is this a real answer?” heuristic: it should reject pure confidence-only outputs and require substantive content.
+
+**Impact:** false positives (counts as success but gives useless output).
+
+---
+
+### If you want a “top 3” to fix first (highest ROI)
+
+1. **Enforce tool calling** (stop the model from emitting JSON tool-call text; make the wrapper execute tool calls or re-ask).
+2. **Stop runaway loops / add budgets** (max tool calls, max iterations, max added context, early exit on medium confidence).
+3. **Fix retrieval/store scoping** (prevent “Maple diseases” chunk from dominating unrelated queries; scope per item/session or use better ranking + freshness + per-query filters).
+
+If you paste one example of a failing `_tracked_extract_keywords` `raw_text` *and* the code where you execute tool calls from model outputs, I can point to the exact enforcement change that prevents the “printed tool call JSON” failure mode.
+
 
 future advancements:
 
@@ -12,274 +138,5 @@ future advancements:
 - using the questions developed by Tushar for keyword extraction
 
 
-def get_exchange_rate(base_currency: str, target_currency: str) -> dict:
-    """Looks up and returns the exchange rate between two currencies.
 
-    Args:
-        base_currency: The ISO 4217 currency code of the currency you
-                       are converting from (e.g., "USD").
-        target_currency: The ISO 4217 currency code of the currency you
-                         are converting to (e.g., "EUR").
 
-    Returns:
-        Dictionary with status and rate information.
-        Success: {"status": "success", "rate": 0.93}
-        Error: {"status": "error", "error_message": "Unsupported currency pair"}
-    """
-
-    # Static data simulating a live exchange rate API
-    # In production, this would call something like: requests.get("api.exchangerates.com")
-    rate_database = {
-        "usd": {
-            "eur": 0.93,  # Euro
-            "jpy": 157.50,  # Japanese Yen
-            "inr": 83.58,  # Indian Rupee
-        }
-    }
-
-    # Input validation and processing
-    base = base_currency.lower()
-    target = target_currency.lower()
-
-    # Return structured result with status
-    rate = rate_database.get(base, {}).get(target)
-    if rate is not None:
-        return {"status": "success", "rate": rate}
-    else:
-        return {
-            "status": "error",
-            "error_message": f"Unsupported currency pair: {base_currency}/{target_currency}",
-        }
-
-
-print("✅ Exchange rate function created")
-print(f"💱 Test: {get_exchange_rate('USD', 'EUR')}")
-
-# Currency agent with custom function tools
-currency_agent = LlmAgent(
-    name="currency_agent",
-    model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config),
-    instruction="""You are a smart currency conversion assistant.
-
-    For currency conversion requests:
-    1. Use `get_fee_for_payment_method()` to find transaction fees
-    2. Use `get_exchange_rate()` to get currency conversion rates
-    3. Check the "status" field in each tool's response for errors
-    4. Calculate the final amount after fees based on the output from `get_fee_for_payment_method` and `get_exchange_rate` methods and provide a clear breakdown.
-    5. First, state the final converted amount.
-        Then, explain how you got that result by showing the intermediate amounts. Your explanation must include: the fee percentage and its
-        value in the original currency, the amount remaining after the fee, and the exchange rate used for the final conversion.
-
-    If any tool returns status "error", explain the issue to the user clearly.
-    """,
-    tools=[get_fee_for_payment_method, get_exchange_rate],
-)
-
-print("✅ Currency agent created with custom function tools")
-print("🔧 Available tools:")
-print("  • get_fee_for_payment_method - Looks up company fee structure")
-print("  • get_exchange_rate - Gets current exchange rates")
-
-
-
-https://chatgpt.com/share/6966d378-241c-800c-a036-a61809082478
-
-Here’s a **clean, technical, copy-paste-ready summary** of what’s going wrong and why, written the way you’d want it in engineering notes.
-
----
-
-## Issue Summary: Qwen2.5-VL with vLLM + ADK does not execute tool calls
-
-### Symptom
-
-The RAG agent **never executes tools**, even though:
-
-* `rag_agent.tools` contains 6 tools
-* The model appears to “call” tools by outputting text like:
-
-  ```
-  _tracked_extract_keywords("query text")
-  ```
-* The worker explicitly reports:
-
-  ```
-  WARNING - No tool calls found in any events!
-  ```
-
-No tool wrapper logs (e.g. `[RAG Tools] retrieve_content: CALLED`) ever appear.
-
----
-
-## What Is Actually Happening
-
-1. **The model is NOT making real tool calls**
-
-   * It is emitting **plain text** that *looks like* a function call
-   * This text is placed in `message.content`, not in a structured `tool_calls` field
-
-2. **vLLM never detects a tool call**
-
-   * The vLLM tool-call parser does not recognize the model’s output as a valid tool invocation
-   * Therefore:
-
-     * `tool_calls = []`
-     * ADK never executes any Python tools
-     * The agent falls back to returning free-text answers
-
-3. **ADK correctly registers tools, but never receives tool events**
-
-   * Confirmed by logs:
-
-     ```
-     Agent has 6 tool(s) in tools attribute
-     ```
-   * But later:
-
-     ```
-     WARNING - No tool calls found in any events!
-     ```
-
----
-
-## Root Cause (Primary)
-
-### ❌ Tool-call parser mismatch with model output format
-
-The model is served as:
-
-```bash
-Qwen/Qwen2.5-VL-7B-Instruct
-```
-
-But vLLM is run with:
-
-```bash
---tool-call-parser qwen3_xml
-```
-
-This causes a **format mismatch**:
-
-* `qwen3_xml` expects **explicit XML-wrapped tool calls**, e.g.
-
-  ```xml
-  <tool_call>
-  {"name":"tool_name","arguments":{...}}
-  </tool_call>
-  ```
-* Qwen2.5-VL is **not being forced** (by prompt or template) to emit that format
-* Instead, it emits:
-
-  ```text
-  _tracked_extract_keywords("...")
-  ```
-
-Because this does not match the parser’s expected syntax, vLLM:
-
-* Treats it as normal text
-* Does not populate `tool_calls`
-* ADK never runs the tool
-
----
-
-## Secondary Contributors
-
-### 1. Tool calls are not strictly enforced in the prompt
-
-* The instruction says “you MUST call tools”
-* But does **not define the exact serialization format**
-* LLMs default to “best-effort imitation” unless format is rigidly specified
-
-### 2. Auto tool choice is enabled, but not sufficient
-
-```bash
---enable-auto-tool-choice
-```
-
-* This only allows tool calling
-* It does **not** force correct formatting
-* The model can still choose to respond in plain text
-
-### 3. ADK + LiteLLM expect structured tool calls
-
-* They do **not** execute tools from strings in `content`
-* Only structured `tool_calls` / `function_call` events trigger execution
-
----
-
-## Confirming Evidence from Logs
-
-* Every event shows:
-
-  ```
-  WARNING - No tool calls found in any events!
-  ```
-* Tool-looking outputs appear only as text:
-
-  ```
-  Rag_Agent > _tracked_extract_keywords("...")
-  ```
-* No wrapper logs like:
-
-  ```
-  [RAG Tools] retrieve_content: CALLED
-  ```
-
-This definitively proves tools are **never executed**.
-
----
-
-## Known Consequences
-
-Because tools never run:
-
-* ❌ Vector DB retrieval never happens
-* ❌ Confidence evaluation never runs
-* ❌ Web search never executes
-* ❌ The agent violates its own instruction (answers directly)
-* ❌ RAG becomes a plain LLM responder
-
----
-
-## Additional Bug Discovered (Unrelated but Blocking Web Search)
-
-In `WebSearch.web_search()`:
-
-* A hardcoded API key exists
-* BUT execution still checks:
-
-  ```python
-  if not self.api_key:
-      return error "Missing YOU_API_KEY"
-  ```
-* Result: `web_search` always fails unless env var is set
-* Even when a key string exists in code
-
----
-
-## Required Fixes (High Level)
-
-### Fix 1 (Critical): Align tool-call format with parser
-
-You must **either**:
-
-* Force Qwen2.5-VL to emit `<tool_call>...</tool_call>` exactly
-  **or**
-* Switch to a parser (e.g. `openai`) that matches your tool-calling style
-
-### Fix 2: Explicitly define tool-call serialization in the instruction
-
-Tool calls must be:
-
-* The **only output**
-* In the **exact format expected by the parser**
-* With no surrounding text
-
-### Fix 3: Remove blocking env-var check in `web_search`
-
-If you intend to ignore env vars, do not gate execution on them.
-
----
-
-## One-Line Diagnosis
-
-> **The model is printing fake tool calls as text, but vLLM cannot parse them into real tool invocations due to a parser/format mismatch, so ADK never executes any tools.**

@@ -6,7 +6,8 @@ set -e
 # standard
 # contextual
 BENCH_TYPE="standard"
-INPUT_FILE="../Datasets/sample_bench/sample_${BENCH_TYPE}_benchmark.json"
+# INPUT_FILE="../Datasets/sample_bench/sample_${BENCH_TYPE}_benchmark.json"
+INPUT_FILE="../Datasets/standard/${BENCH_TYPE}_benchmark.json"
 
 ################### Close Source Models ###################
 # gpt-4o
@@ -16,8 +17,9 @@ INPUT_FILE="../Datasets/sample_bench/sample_${BENCH_TYPE}_benchmark.json"
 
 ################### Open Source Models ###################
 # Qwen/Qwen2.5-VL-3B-Instruct
+# meta-llama/Llama-3.2-11B-Vision-Instruct
 
-MODEL_NAME='Qwen/Qwen2.5-VL-3B-Instruct'
+MODEL_NAME='meta-llama/Llama-3.2-11B-Vision-Instruct'
 MODEL_NAME_CLEANED=$(echo "$MODEL_NAME" | sed 's|.*/||')
 
 # You can use VLLM to launch the Open Source Models, remember to change the OPENAI_API_BASE
@@ -27,13 +29,13 @@ OPENAI_API_BASE="http://127.0.0.1:11434/v1"
 NUM_PROCESSES=10
 
 EMBED_MODEL_NAME="BAAI/bge-base-en-v1.5"
-TEST_MODEL="Qwen/Qwen2.5-VL-3B-Instruct"
+TEST_MODEL="meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEVICE="None"
 
 echo "Inference $MODEL_NAME on $BENCH_TYPE Benchmark"
 
 # Inference results will be saved in the following directory
-OUTPUT_DIR="results/${BENCH_TYPE}"
+OUTPUT_DIR="results/${BENCH_TYPE}_benchmark"
 
 mkdir -p $OUTPUT_DIR
 

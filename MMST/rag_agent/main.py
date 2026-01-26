@@ -13,7 +13,7 @@ from typing import Optional, Dict, List, Any
 
 
 class MainAgent:
-    def __init__(self, test_model: str = "Qwen2.5-VL-7B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None", api_base: str = "http://127.0.0.1:11434/v1"):
+    def __init__(self, test_model: str = "Qwen2.5-VL-3B-Instruct", embed_model_name: str = "BAAI/bge-base-en-v1.5", device: str = "None", api_base: str = "http://127.0.0.1:11434/v1"):
         self.test_model = test_model
         self.api_base = api_base
         self.embedding_function = SentenceTransformerEmbeddingFunction(embed_model_name, device)
@@ -64,6 +64,17 @@ class MainAgent:
             print(f"[RAG Tools] ✗ retrieve_content: FAILED - {result.get('error_message', 'Unknown error')}", flush=True)
         return result
     
+    def reset_collection(self) -> None:
+        """Drop and recreate the collection (clean slate)."""
+        self.client.delete_collection(name="meta-mirage_collection")
+        self.collection = self.client.get_or_create_collection(
+            name="meta-mirage_collection",
+            embedding_function=self.embedding_function
+        )
+        self.pdf_addition = PDFAddition(self.collection, self.content_utils, self.null_str)
+        self.web_addition = WebAddition(self.collection, self.content_utils, self.null_str, self.null_int)
+        self.confidence_evaluator = ConfidenceEvaluator(self.collection, self.content_utils)
+
     def _tracked_evaluate_confidence(self, *, query: str, location: Optional[str] = None,
                                       month_year: Optional[str] = None, title: Optional[str] = None, k: int = 5) -> Dict:
         """Evaluates confidence of retrieved evidence for a query.
@@ -217,7 +228,18 @@ class MainAgent:
             tool_name = getattr(tool, '__name__', 'unknown')
             print(f"[RAG Agent Init]   Tool {i+1}: {tool_name}")
         
-        model_litellm = LiteLlm(model=model_name)
+        SGLANG_BASE_URL = "http://127.0.0.1:11434/v1"
+        SGLANG_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        API_KEY = "EMPTY"
+
+        model_litellm = LiteLlm(
+            model=f"openai/{SGLANG_MODEL}",
+            api_base=SGLANG_BASE_URL,
+            api_key=API_KEY,
+            additional_kwargs={
+                "tool_choice": "auto",
+            },
+        )
         
         rag_agent = LlmAgent(
             name="Rag_Agent",
