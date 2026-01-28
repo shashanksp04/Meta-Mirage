@@ -93,7 +93,7 @@ class ContentUtils:
         month_year: Optional[str] = None,
         title: Optional[str] = None,
         k: int = 5,
-        min_results: int = 2,
+        min_results: int = 1,
     ) -> Tuple[Optional[Dict], str, List[Dict]]:
         """
         Performs semantic retrieval with progressive metadata filtering.
@@ -104,41 +104,85 @@ class ContentUtils:
             results: List of retrieved chunks with text, metadata, and distance
         """
 
-        location = location.upper() if location else None
-        month_year = month_year.strip() if month_year else None
-        title = title.strip() if title else None
+        def _clean(value: Optional[str], *, upper: bool = False) -> Optional[str]:
+            """Normalize incoming metadata values and treat NULL-like strings as missing."""
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                value = str(value)
+
+            v = value.strip()
+            if not v:
+                return None
+
+            # Treat these as missing
+            if v.upper() in {"NULL", "NONE", "N/A", "NA", "UNKNOWN"}:
+                return None
+
+            return v.upper() if upper else v
+
+        def _eq(field: str, val: str) -> Dict:
+            """Single equality clause in Chroma where syntax."""
+            return {field: {"$eq": val}}
+
+        def _make_where(**kwargs: Optional[str]) -> Optional[Dict]:
+            """
+            Build a valid Chroma where filter:
+            - None if no filters
+            - single clause dict if exactly one
+            - {"$and": [...]} if multiple
+            """
+            clauses = []
+            for field, val in kwargs.items():
+                if val is not None:
+                    clauses.append(_eq(field, val))
+
+            if not clauses:
+                return None
+            if len(clauses) == 1:
+                return clauses[0]
+            return {"$and": clauses}
+
+        # Clean inputs (and treat "NULL" as None)
+        location = _clean(location, upper=True)
+        month_year = _clean(month_year, upper=False)
+        title = _clean(title, upper=False)
 
         filter_attempts: List[Tuple[str, Optional[Dict]]] = []
 
+        # Most specific -> least specific -> semantic only
         if location and month_year and title:
             filter_attempts.append((
                 "location+month_year+title",
-                {"location": location, "month_year": month_year, "title": title}
+                _make_where(location=location, month_year=month_year, title=title),
             ))
 
         if location and month_year:
             filter_attempts.append((
                 "location+month_year",
-                {"location": location, "month_year": month_year}
+                _make_where(location=location, month_year=month_year),
             ))
 
         if location:
-            filter_attempts.append(("location", {"location": location}))
+            filter_attempts.append(("location", _make_where(location=location)))
 
         if title:
-            filter_attempts.append(("title", {"title": title}))
+            filter_attempts.append(("title", _make_where(title=title)))
 
         filter_attempts.append(("semantic_only", None))
 
-        for strategy_name, where_filter in filter_attempts:
+        k = int(k)
+        min_results = int(min_results)
 
+
+        for strategy_name, where_filter in filter_attempts:
             query_args = {
                 "query_texts": [query],
                 "n_results": k,
                 "include": ["documents", "metadatas", "distances"],
             }
 
-            if where_filter:
+            if where_filter is not None:
                 query_args["where"] = where_filter
 
             results = collection.query(**query_args)
@@ -152,13 +196,10 @@ class ContentUtils:
                     where_filter,
                     strategy_name,
                     [
-                        {
-                            "text": doc,
-                            "metadata": metadata,
-                            "distance": distance,
-                        }
+                        {"text": doc, "metadata": metadata, "distance": distance}
                         for doc, metadata, distance in zip(docs, metadatas, distances)
                     ],
                 )
 
         return None, "no_results", []
+

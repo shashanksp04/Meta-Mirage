@@ -18,7 +18,7 @@ class KeywordExtractor:
         """
         self.client = Client(model_name=model_name, openai_api_base=openai_api_base)
 
-    def _extract_first_json_blob(text: str) -> str | None:
+    def _extract_first_json_blob(self, text: str) -> str | None:
         """
         Try to pull out the first JSON array/object from a messy model response.
         """
@@ -26,19 +26,19 @@ class KeywordExtractor:
         t = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "").strip()
 
         # prefer an array if present
-        m = re.search(r"\[[\s\S]*\]", t)
+        m = re.search(r"\[[\s\S]*?\]", t)
         if m:
             return m.group(0)
 
         # else try object
-        m = re.search(r"\{[\s\S]*\}", t)
+        m = re.search(r"\{[\s\S]*?\}", t)
         if m:
             return m.group(0)
 
         return None
 
 
-    def _parse_keywords_any(raw_text: str):
+    def _parse_keywords_any(self, raw_text: str):
         """
         Accepts:
         - ["a","b"]
@@ -46,7 +46,7 @@ class KeywordExtractor:
         - "['a','b']" (stringified)
         - single quotes / trailing commas (fallback via ast.literal_eval)
         """
-        blob = _extract_first_json_blob(raw_text) or raw_text.strip()
+        blob = self._extract_first_json_blob(raw_text) or raw_text.strip()
 
         # First try strict JSON
         try:
@@ -150,11 +150,14 @@ class KeywordExtractor:
 
         try:
             raw_text = self.client.chat(prompt=prompt)
-           
+            print("RAW:", repr(raw_text))
+
             try:
-                keywords = _parse_keywords_any(raw_text)
+                keywords = self._parse_keywords_any(raw_text)
             except Exception:
-                return {"status": "error", "error_message": "Model did not return a valid JSON list"}
+                return {"status": "error", 
+                        "error_message": "Model did not return a valid JSON list",
+                        "raw_text_preview": raw_text[:500],}
 
             if not keywords:
                 return {

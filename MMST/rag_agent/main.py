@@ -132,8 +132,11 @@ class MainAgent:
     def _tracked_add_web_content(self, *, url: str, location: Optional[str] = None,
                                  month_year: Optional[str] = None, language: str = "en") -> Dict:
         """Wrapper around add_web_content that prints success/failure"""
+        before = self.collection.count()
         result = self.web_addition.add_web_content(url=url, location=location, 
-                                                   month_year=month_year, language=language)
+                month_year=month_year, language=language)
+        after = self.collection.count()
+        print(f"[RAG Tools] add_web_content: count delta={after-before} (before={before}, after={after})", flush=True)
         status = result.get("status", "unknown")
         if status == "success":
             print(f"[RAG Tools] ✓ add_web_content: SUCCESS")
@@ -170,7 +173,7 @@ class MainAgent:
             keywords_count = len(result.get("keywords", []))
             print(f"[RAG Tools] ✓ extract_keywords: SUCCESS ({keywords_count} keywords)")
         else:
-            print(f"[RAG Tools] ✗ extract_keywords: FAILED - {result.get('error_message', 'Unknown error')}")
+            print(f"[RAG Tools] ✗ extract_keywords: FAILED - {result.get('raw_text_preview', 'Unknown error')}")
         return result
 
     def retrieve_content(self,
@@ -189,6 +192,7 @@ class MainAgent:
                 "results": [],
             }
 
+        print(f"[RAG Tools] collection.count()={self.collection.count()}", flush=True)
         used_filter, strategy, results = self.content_utils.retrieve_with_priority_filters(
             query=query,
             collection=self.collection,
@@ -298,7 +302,10 @@ class MainAgent:
             - You MUST call _tracked_extract_keywords ONCE to prepare for web search.
             - Join extracted keywords into a single query string.
             - You MUST call _tracked_web_search with the extracted keywords.
-            - You MUST call _tracked_add_web_content to add relevant web content to the database (ONLY from web_search results).
+            - From the returned object, use the `url` field inside each item of `results`.
+            - You MUST call _tracked_add_web_content for URLs from those web_search results ONLY.
+            - You MUST ingest at least 5 successful URLs (status="success"), up to 10 total attempts.
+            - If _tracked_add_web_content fails for a URL, try the next URL from `results` until you reach 5 successes or you run out of results.
             - You MUST call _tracked_retrieve_content again from the vector database.
             - You MUST call _tracked_evaluate_confidence again.
 
