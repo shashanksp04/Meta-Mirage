@@ -20,118 +20,18 @@ python -m vllm.entrypoints.openai.api_server   --model Qwen/Qwen2.5-VL-7B-Instru
 
 Models available : https://github.com/eugeneyan/open-llms?utm_source=chatgpt.com
 
-Current Errors to handle:
-Here are the major bugs/patterns I see in your trace (grouped by impact):
+# Regarding multi-processing issue:
 
-## 1) `_tracked_extract_keywords` is fundamentally unreliable (and causes cascaded bad behavior)
-
-* It fails constantly: **“Model did not return a valid JSON list.”**
-* It’s called **multiple times per item** even after failing once (wasted tokens + latency).
-* When it fails, your agent sometimes falls back, but other times it still proceeds in a way that doesn’t improve search quality (e.g., generic web queries like “insect identification…”).
-
-**Impact:** poorer web queries + extra tool calls + more latency → contributes to timeouts.
-
-## 2) The agent sometimes “prints tool calls” instead of actually calling tools (tool-calling contract break)
-
-Example failure:
-
-* For item `#883270` / `#889142` / `#887031` / `#888009`, the extracted “answer” is basically:
-
-  * `"Confidence: medium"\n\n{"name": "_tracked_retrieve_content", "parameters": {...}}`
-
-Your response extractor flags it correctly: **“Response is just tool names, not actual results.”**
-
-**Root cause:** your model is not reliably in “tool-calling mode” (or the wrapper isn’t enforcing tool calls). It’s emitting *a textual representation* of a tool call rather than using the tool interface.
-
-**Impact:** hard failures (no usable answer) and/or downstream “fallback to original query”.
-
-## 3) Massive timeout rate: the agent often never produces a final answer event
-
-You have tons of:
-
-* `RAG TIMEOUT - No response after 60s / 70s / 110s / 115s`
-
-But you also show cases where the agent produced a long answer (5k–20k chars) fine.
-
-**Likely causes (not mutually exclusive):**
-
-* **Runaway loops**: repeated tool calls (keywords → web → add → retrieve → confidence → keywords → …) without a clear “stop when good enough”.
-* **No hard budget** on tool calls / iterations per item.
-* **Slow tools** (web extraction, PDF parsing) and no early exit.
-* **Model sometimes stalls** due to long context after you add large web page content (your evidence blocks are huge).
-
-**Impact:** throughput collapse on a benchmark; majority items revert to “original query”.
-
-## 4) Retrieval contamination / irrelevant evidence being reused across unrelated questions
-
-You repeatedly see “Maple Tree Diseases and How to Treat Them” show up as EVIDENCE for:
-
-* insect ID,
-* shade perennials,
-* bug with proboscis,
-* hops variety,
-  etc.
-
-That suggests your “RAG memory/store” is:
-
-* not scoped to the current query,
-* or retrieval is weighted too heavily toward a previously-added chunk,
-* or dedup/indexing is broken.
-
-**Impact:** wrong answers even when you *don’t* timeout.
-
-## 5) `retrieve_content` often returns “No results found” even after web_search succeeded
-
-Example:
-
-* `web_search SUCCESS (10 results)`
-* `add_web_content SUCCESS`
-* then `retrieve_content FAILED - No results found`
-
-That’s a serious integration mismatch: you added web content, but retrieval can’t find it, likely because:
-
-* add_web_content isn’t indexing under the same namespace/store that retrieve_content queries,
-* or the stored fields don’t match the query field you use,
-* or retrieval filtering (location/month_year/title) is inadvertently excluding everything.
-
-**Impact:** the agent can’t ground answers and stays low-confidence or loops.
-
-## 6) `add_web_content` failures reduce grounding and increase looping
-
-You have:
-
-* `add_web_content: FAILED - Web extraction failed: no_main_content`
-* `FAILED - No new content to add after deduplication`
-
-If “no_main_content” happens frequently, your web extractor is too brittle (modern sites, cookie walls, dynamic pages). If dedup nukes everything, your dedup key is too aggressive (e.g., same domain, same title, or same URL normalization).
-
-**Impact:** the agent keeps searching but never improves retrieval, leading to timeouts/low confidence.
-
-## 7) Response extraction is accepting junk “answers” (e.g., 17 chars)
-
-Item `#885475` yields an “answer” of length **17 chars**:
-
-* basically `"Confidence: low"` is treated as a valid answer by the extraction step.
-
-Your log even says:
-
-* “✓ SUCCESS - Extracted valid answer (17 chars)”
-
-That’s a bug in the “is this a real answer?” heuristic: it should reject pure confidence-only outputs and require substantive content.
-
-**Impact:** false positives (counts as success but gives useless output).
-
----
-
-### If you want a “top 3” to fix first (highest ROI)
-
-1. **Enforce tool calling** (stop the model from emitting JSON tool-call text; make the wrapper execute tool calls or re-ask).
-2. **Stop runaway loops / add budgets** (max tool calls, max iterations, max added context, early exit on medium confidence).
-3. **Fix retrieval/store scoping** (prevent “Maple diseases” chunk from dominating unrelated queries; scope per item/session or use better ranking + freshness + per-query filters).
-
-If you paste one example of a failing `_tracked_extract_keywords` `raw_text` *and* the code where you execute tool calls from model outputs, I can point to the exact enforcement change that prevents the “printed tool call JSON” failure mode.
-
-
+1. run 1 pool worker only - will take a lot of time
+2. get access to 8 GPUs and run a rag worker on all 8 - ingestion/addition will create problem, unless we make it 
+    read/retrieve only and pre-built the database 
+3. creating a separate write_only process which writes into the DB, all the other rag workes submit request to this process.
+    - problem is we do web-search store results, and then call retrieve again 
+    - what if we process and extract data from that results and go ahead, and let the write-process write it later?
+      - will be doing the same work twice
+    - we can use the chroma server mode using HttpClient(host="", port=) instead of PersistentClient(path="") to solve the issue
+    of stale data. That is, write is adding the data but reader doesn't see new data
+      - 
 future advancements:
 
 - creating agents for individual function : evaluation, retrieval etc. (multi-agent architecture)
